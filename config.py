@@ -148,6 +148,14 @@ SYMBOL_NAMES = {
     'STRC': 'Stretch Pref', 'STRD': 'Stride Pref',
     'MSTU': '2x Long MSTR', 'MSTX': '2x Long MSTR', 'MSTZ': '2x Inv MSTR',
     'MSTY': 'MSTR Options Income',
+    # World indices
+    '^STI': 'Singapore STI', '^HSI': 'Hang Seng', '000001.SS': 'Shanghai Composite',
+    '^N225': 'Nikkei 225', '^AXJO': 'ASX 200', '^BSESN': 'India Sensex',
+    '^KS11': 'KOSPI', '^KLSE': 'Malaysia KLCI', '^TWII': 'Taiwan TWSE',
+    '^FTSE': 'FTSE 100', '^GDAXI': 'Germany DAX', '^FCHI': 'France CAC 40',
+    '^STOXX50E': 'Euro Stoxx 50', '^GSPC': 'S&P 500 Index', '^IXIC': 'Nasdaq Composite',
+    '^DJI': 'Dow Jones', '^RUT': 'Russell 2000', '^GSPTSE': 'Canada TSX',
+    '^BVSP': 'Brazil IBOVESPA', '^MXX': 'Mexico IPC',
     # Crypto companies
     'COIN': 'Coinbase', 'MARA': 'Marathon Digital', 'RIOT': 'Riot Platforms',
     'HOOD': 'Robinhood', 'CORZ': 'Core Scientific', 'CLSK': 'CleanSpark',
@@ -188,6 +196,34 @@ def get_theme():
     """Single source of truth for current theme — used by all tabs."""
     name = st.session_state.get('theme', 'Dark')
     return THEMES.get(name, THEMES['Dark'])
+
+def st_html(page, height=0):
+    """Embed a raw HTML string in an iframe.
+
+    Prefers st.iframe (st.components.v1.html is deprecated for removal); falls
+    back to the legacy component on older Streamlit builds.
+    """
+    if hasattr(st, 'iframe'):
+        # st.iframe rejects height=0, which the legacy component allowed for
+        # script-only embeds.
+        return st.iframe(page, height=max(1, int(height)))
+    from streamlit.components.v1 import html as _legacy_html
+    return _legacy_html(page, height=height)
+
+def sort_val(v, default=float('-inf')):
+    """Sort key for optional numerics.
+
+    `v or default` is wrong here: it sends an exactly-flat 0.0 to the bottom of
+    the table and leaves NaN as the key, which makes the ordering arbitrary.
+    """
+    if v is None:
+        return default
+    try:
+        if v != v:  # NaN
+            return default
+    except TypeError:
+        return default
+    return v
 
 def surface():
     """Derived surface palette for HTML rendering — used by all tabs."""

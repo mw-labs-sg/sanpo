@@ -1,7 +1,8 @@
-streamlit>=1.30.0
+streamlit>=1.50.0
 yfinance>=0.2.30
 pandas>=2.0.0
 numpy>=1.24.0
 plotly>=5.18.0
 pytz>=2023.3
 feedparser>=6.0.0
+requests>=2.31.0

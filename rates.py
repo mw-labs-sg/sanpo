@@ -5,7 +5,6 @@ Overlay both curves, show 2s10s spread, SORA vs SOFR.
 """
 
 import streamlit as st
-import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import urllib.request
@@ -119,7 +118,8 @@ def _fetch_sg_mas():
     from datetime import date
 
     end = date.today()
-    start = date(end.year - 2, end.month, end.day)
+    # date(year-2, ...) raises on 29 Feb; step back in days instead.
+    start = end - timedelta(days=730)
 
     params = urllib.parse.urlencode({
         'resource_id': SGS_RESOURCE,
@@ -394,7 +394,7 @@ def _render_curve_chart(us, theme):
                      tickvals=[0.08, 0.17, 0.25, 0.33, 0.5, 1, 2, 3, 5, 7, 10, 20, 30],
                      ticktext=['1M', '2M', '3M', '4M', '6M', '1Y', '2Y', '3Y', '5Y', '7Y', '10Y', '20Y', '30Y'])
     fig.update_yaxes(gridcolor=_grd, tickfont=dict(color='#888', size=9, family=FONTS), side='right')
-    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+    st.plotly_chart(fig, width='stretch', config={'displayModeBar': False})
 
 
 def _render_us_table(us, theme):
@@ -502,7 +502,7 @@ def _render_sg_curve_chart(sg, theme):
                      tickvals=[0.5, 1, 2, 5, 10, 15, 20, 30],
                      ticktext=['6M', '1Y', '2Y', '5Y', '10Y', '15Y', '20Y', '30Y'])
     fig.update_yaxes(gridcolor=_grd, tickfont=dict(color='#888', size=9, family=FONTS), side='right')
-    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+    st.plotly_chart(fig, width='stretch', config={'displayModeBar': False})
 
 
 def _render_sg_table(sg, sora, theme):

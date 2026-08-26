@@ -4,7 +4,7 @@ import re
 import logging
 import warnings
 
-from config import THEMES, get_theme
+from config import get_theme, st_html
 
 # =============================================================================
 # SETUP
@@ -22,8 +22,8 @@ st.set_page_config(page_title="SANPO", layout="wide", initial_sidebar_state="col
 def _inject_theme_css():
     t = get_theme()
     is_light = t.get('mode') == 'light'
-    bg = t.get('bg', '#0f1117'); bg2 = t.get('bg2', '#0a0f1a'); bg3 = t.get('bg3', '#0f172a'); bdr = t.get('border', '#1e293b')
-    txt = t.get('text', '#e2e8f0'); txt2 = t.get('text2', '#94a3b8'); muted = t.get('muted', '#475569'); accent = t.get('accent', '#4ade80')
+    bg = t.get('bg', '#0f1117'); bg3 = t.get('bg3', '#0f172a'); bdr = t.get('border', '#1e293b')
+    txt = t.get('text', '#e2e8f0'); accent = t.get('accent', '#4ade80')
     sb_bg = '#f1f5f9' if is_light else '#1a2744'
     sel_bg = '#f1f5f9' if is_light else '#1a2744'
     sel_c = '#334155' if is_light else '#b0b0b0'
@@ -68,6 +68,9 @@ def _inject_theme_css():
     #MainMenu {{visibility: hidden;}}
     footer {{visibility: hidden;}}
     [data-testid="stStatusWidget"] {{visibility: hidden;}}
+    [data-testid="stAppDeployButton"] {{display: none;}}
+    [data-testid="stToolbar"] {{display: none;}}
+    header[data-testid="stHeader"] {{height: 0; min-height: 0;}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -187,7 +190,6 @@ def main():
         render_research_tab()
 
     # Global auto-refresh aligned to :00 :30
-    from streamlit.components.v1 import html as st_html
     st_html("""<script>
     (function(){
         var now=new Date(), m=now.getMinutes(), s=now.getSeconds(), ms=now.getMilliseconds();

@@ -2,11 +2,8 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from collections import OrderedDict
 from config import FUTURES_GROUPS, THEMES, SYMBOL_NAMES, FONTS, clean_symbol
-from portfolio import (C_POS, C_NEG, C_MUTE, C_BG, C_TXT, C_TXT2, C_GOLD, C_EW,
-                       C_BORDER,
-                       REBAL_OPTIONS, PERIOD_OPTIONS, SCORE_TO_RANK,
+from portfolio import (C_MUTE, C_BG, C_TXT, C_TXT2, C_GOLD, REBAL_OPTIONS, PERIOD_OPTIONS, SCORE_TO_RANK,
                        fetch_symbol_history, _calc_oos_metrics,
                        run_walkforward_grid, run_fullsample,
                        render_ranking_table,
@@ -185,7 +182,6 @@ def render_single_tab(is_mobile):
 def _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
             direction, sims_str, max_wt_str, min_wt_str, max_vol_str, min_ret_str,
             txn_cost):
-    import portfolio
     try: max_wt = max(10, min(100, float(max_wt_str))) / 100.0
     except (ValueError, TypeError): max_wt = 0.50
     try: min_wt = max(0, min(50, float(min_wt_str))) / 100.0
@@ -294,7 +290,6 @@ def _display_mc(is_mobile, _lbl):
 def _run_fs(symbols, score, rebal_label, rebal, period_label, fetch_days,
             direction, sims_str, max_wt_str, min_wt_str, max_vol_str, min_ret_str,
             txn_cost):
-    import portfolio
     try: max_wt = max(10, min(100, float(max_wt_str))) / 100.0
     except (ValueError, TypeError): max_wt = 0.50
     try: min_wt = max(0, min(50, float(min_wt_str))) / 100.0
@@ -527,7 +522,7 @@ def _display_ew(is_mobile, theme):
     fig.update_yaxes(gridcolor=_grd, linecolor=_axl,
         tickfont=dict(color=_tk, size=9, family=FONTS), side='right')
     fig.update_yaxes(ticksuffix='%', row=2, col=1)
-    st.plotly_chart(fig, use_container_width=True, config={
+    st.plotly_chart(fig, width='stretch', config={
         'scrollZoom': True, 'displayModeBar': False, 'responsive': True})
 
     # Monthly returns

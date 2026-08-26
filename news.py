@@ -1,11 +1,11 @@
 import streamlit as st
 import feedparser
-from streamlit.components.v1 import html as st_html
 import logging
 import re
 import urllib.request
+from datetime import datetime
 from html import escape as html_escape, unescape as html_unescape
-from config import FONTS, THEMES
+from config import FONTS, THEMES, st_html
 
 logger = logging.getLogger(__name__)
 
@@ -83,13 +83,15 @@ def _source_tier(source_name):
             return v
     return 2  # default mid-tier
 
-def _recency_score(date_str):
-    """Return 0-3 recency score from '2h ago' style strings."""
-    if not date_str: return 1
-    m = re.match(r'(\d+)([mh])', date_str.lower())
-    if not m: return 1
-    val, unit = int(m.group(1)), m.group(2)
-    minutes = val if unit == 'm' else val * 60
+def _recency_score(sort_key):
+    """Return 0-3 recency score from an ISO-8601 publication timestamp."""
+    if not sort_key: return 1
+    try:
+        dt = datetime.fromisoformat(sort_key)
+    except (TypeError, ValueError):
+        return 1
+    now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+    minutes = (now - dt).total_seconds() / 60
     if minutes <= 120:  return 3   # < 2h
     if minutes <= 360:  return 2   # < 6h
     if minutes <= 1440: return 1   # < 24h
@@ -105,7 +107,7 @@ def score_and_rank(items, top_n=8):
             continue
         seen_titles.add(title_key)
         tier  = _source_tier(item.get('source',''))
-        rec   = _recency_score(item.get('date',''))
+        rec   = _recency_score(item.get('sort_key',''))
         score = (4 - tier) * 10 + rec   # tier 1 = 30+rec, tier 2 = 20+rec, tier 3 = 10+rec
         scored.append({**item, '_score': score, '_tier': tier})
     scored.sort(key=lambda x: x['_score'], reverse=True)
@@ -156,7 +158,8 @@ def fetch_rss_feed(name, url):
                 except Exception:
                     date_str = pub[:16]
                     sort_key = ''
-            items.append({'title': html_escape(title), 'url': link, 'date': date_str, 'sort_key': sort_key, 'source': name})
+            items.append({'title': html_escape(title), 'url': html_escape(link, quote=True),
+                          'date': html_escape(date_str), 'sort_key': sort_key, 'source': name})
         return items
     except Exception as e:
         logger.warning(f"RSS error [{name}]: {e}")
@@ -193,8 +196,10 @@ def render_news_panel(region, feeds, max_items=20, height=600):
                 "<span style='flex-shrink:0;width:115px;display:flex;gap:5px;align-items:baseline'>"
                 "<span style='color:" + _accent + ";font-weight:600;font-size:9px'>" + item['source'] + "</span>"
                 "<span style='color:" + _txt2 + ";font-size:9px'>" + item['date'] + "</span></span>"
-                "<a href='" + item['url'] + "' target='_blank' style='color:" + _link_c + ";text-decoration:none;"
-                "font-size:10.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis'>" + item['title'] + "</a>"
+                "<a href='" + item['url'] + "' target='_blank' title='" + item['title'] + "' "
+                "style='color:" + _link_c + ";text-decoration:none;flex:1;min-width:0;"
+                "font-size:10.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis;"
+                "white-space:nowrap'>" + item['title'] + "</a>"
                 "</div>"
             )
 

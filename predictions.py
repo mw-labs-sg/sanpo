@@ -11,9 +11,8 @@ from datetime import datetime
 import pytz
 import logging
 import re
-from streamlit.components.v1 import html as st_html
 
-from config import THEMES, FONTS
+from config import THEMES, FONTS, st_html
 
 logger = logging.getLogger(__name__)
 
@@ -24,19 +23,40 @@ def get_theme():
 
 
 def _export_to_github(markets):
-    """Silently write predictions.json to GitHub after fetching data."""
+    """Write predictions.json to GitHub — only when the data actually changed.
+
+    Streamlit re-runs every tab on every interaction, so calling the API here
+    directly meant a GET + PUT (and a commit) per script run. The payload is
+    built without a timestamp so it can key a cache, and the push only fires on
+    a genuine content change (or hourly).
+    """
+    try:
+        if not st.secrets.get("GITHUB_TOKEN", ""):
+            return
+        data = {
+            'source': 'SANPO Predictions - Polymarket',
+            'count': len(markets),
+            'markets': markets
+        }
+        _push_predictions_json(json.dumps(data, indent=2, ensure_ascii=False))
+    except Exception as e:
+        logger.warning(f"GitHub export error: {e}")
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _push_predictions_json(body_json):
+    """Commit predictions.json. Cached on body_json so unchanged data is a no-op.
+
+    The token is read here rather than passed in, to keep it out of the cache key.
+    """
     try:
         token = st.secrets.get("GITHUB_TOKEN", "")
         if not token:
             return
         sgt = pytz.timezone('Asia/Singapore')
-        now_str = datetime.now(sgt).isoformat()
-        data = {
-            'updated': now_str,
-            'source': 'SANPO Predictions - Polymarket',
-            'count': len(markets),
-            'markets': markets
-        }
+        data = json.loads(body_json)
+        data['updated'] = datetime.now(sgt).isoformat()
+
         url = "https://api.github.com/repos/YureiKara/sanpo/contents/predictions.json"
         headers = {
             "Authorization": f"token {token}",
@@ -54,7 +74,7 @@ def _export_to_github(markets):
             payload["sha"] = sha
         requests.put(url, headers=headers, json=payload, timeout=10)
     except Exception as e:
-        logger.warning(f"GitHub export error: {e}")
+        logger.warning(f"GitHub push error: {e}")
 
 
 CATEGORIES = {
@@ -160,19 +180,19 @@ def fetch_markets(category='All', limit=30):
                     outcomes = m.get('outcomes', '[]')
                     if isinstance(prices, str):
                         try: prices = _json.loads(prices)
-                        except: prices = []
+                        except Exception: prices = []
                     if isinstance(outcomes, str):
                         try: outcomes = _json.loads(outcomes)
-                        except: outcomes = []
+                        except Exception: outcomes = []
                     yes_price = None
                     for o, p in zip(outcomes, prices):
                         if str(o).lower() == 'yes':
                             try: yes_price = round(float(p) * 100, 1)
-                            except: pass
+                            except Exception: pass
                             break
                     if yes_price is None and prices:
                         try: yes_price = round(float(prices[0]) * 100, 1)
-                        except: pass
+                        except Exception: pass
                     if mq:
                         outcome_list.append({'label': mq, 'pct': yes_price})
             else:
@@ -182,13 +202,13 @@ def fetch_markets(category='All', limit=30):
                 prices   = m.get('outcomePrices', '[]')
                 if isinstance(outcomes, str):
                     try: outcomes = _json.loads(outcomes)
-                    except: outcomes = []
+                    except Exception: outcomes = []
                 if isinstance(prices, str):
                     try: prices = _json.loads(prices)
-                    except: prices = []
+                    except Exception: prices = []
                 for o, p in zip(outcomes, prices):
                     try: pct = round(float(p) * 100, 1)
-                    except: pct = None
+                    except Exception: pct = None
                     outcome_list.append({'label': str(o), 'pct': pct})
 
             outcome_list.sort(key=lambda x: x.get('pct') or 0, reverse=True)
@@ -234,13 +254,11 @@ def _build_table(markets, theme, sort_by='Volume'):
     bg3   = theme.get('bg3', '#0f172a')
     bdr   = theme.get('border', '#1e293b')
     mut   = theme.get('muted', '#475569')
-    txt   = theme.get('text', '#e2e8f0')
     txt2  = theme.get('text2', '#94a3b8')
     acc   = theme.get('accent', '#4ade80')
     pos_c = theme.get('pos', '#4ade80')
     neg_c = theme.get('neg', '#f59e0b')
     blue  = '#60a5fa'
-    purp  = '#c084fc'
 
     # Sort markets
     sort_map = {
@@ -277,8 +295,6 @@ def _build_table(markets, theme, sort_by='Volume'):
         vol24_str = _fmt_vol(m['volume24'])
         vol1wk_str= _fmt_vol(m.get('vol1wk', 0))
         liq_str   = _fmt_vol(m.get('liquidity', 0))
-        oi_val    = m.get('open_interest', 0)
-        oi_str    = _fmt_vol(oi_val) if oi_val else '—'
 
         # Build outcomes rows — each on own line, consistent 3 lines
         outcomes_html = ''
@@ -366,10 +382,10 @@ def render_predictions_tab(is_mobile):
     col_cat, col_sort, col_spacer, col_info = st.columns([1, 1, 2, 2])
     with col_cat:
         st.markdown(f"<div style='font-size:9px;font-weight:700;color:#e2e8f0;font-family:{FONTS};text-transform:uppercase;letter-spacing:0.08em;margin-bottom:-18px'>CATEGORY</div>", unsafe_allow_html=True)
-        category = st.selectbox('pred_cat', list(CATEGORIES.keys()), key='pred_category', label_visibility='collapsed')
+        category = st.selectbox('Category', list(CATEGORIES.keys()), key='pred_category', label_visibility='collapsed')
     with col_sort:
         st.markdown(f"<div style='font-size:9px;font-weight:700;color:#e2e8f0;font-family:{FONTS};text-transform:uppercase;letter-spacing:0.08em;margin-bottom:-18px'>SORT BY</div>", unsafe_allow_html=True)
-        sort_by = st.selectbox('pred_sort', ['Volume', '24H Vol', '7D Vol', 'Liquidity', 'Expiry'], key='pred_sort_sel', label_visibility='collapsed')
+        sort_by = st.selectbox('Sort by', ['Volume', '24H Vol', '7D Vol', 'Liquidity', 'Expiry'], key='pred_sort_sel', label_visibility='collapsed')
 
     with st.spinner('Loading prediction markets...'):
         markets = fetch_markets(category)

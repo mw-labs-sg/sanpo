@@ -6,9 +6,8 @@ from datetime import datetime
 from collections import OrderedDict
 import pytz
 import logging
-from streamlit.components.v1 import html as st_html
 
-from config import FUTURES_GROUPS, THEMES, FONTS, clean_symbol
+from config import THEMES, FONTS, clean_symbol, st_html
 
 logger = logging.getLogger(__name__)
 
@@ -342,7 +341,6 @@ def _next_holiday(holidays, today):
     return None, None, None
 
 def _market_status():
-    from datetime import date
     now_utc = datetime.now(pytz.utc)
     today = now_utc.astimezone(pytz.timezone('Asia/Singapore')).date()
     results = []
@@ -377,8 +375,6 @@ def _render_market_status_bar():
     for m in markets:
         # Dot color: red for SG, blue for US (always their color, brighter when open)
         dot_c = m['dot_color']
-        glow = ''
-        pulse = ''
         # Country name: strong text
         nc = ('#0f172a' if is_light else '#f8fafc') if m['open'] else ('#64748b' if is_light else '#f8fafc')
         # Time: always visible

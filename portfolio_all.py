@@ -3,13 +3,10 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from collections import OrderedDict
 import logging
 
-from config import FUTURES_GROUPS, THEMES, SYMBOL_NAMES, FONTS, clean_symbol
-from portfolio import (C_MUTE, C_BG, C_HDR, C_TXT, C_TXT2, C_BORDER,
-                       C_GOLD, C_EW, _short,
-                       REBAL_OPTIONS, PERIOD_OPTIONS, SCORE_TO_RANK,
+from config import FUTURES_GROUPS, THEMES, FONTS
+from portfolio import (REBAL_OPTIONS, PERIOD_OPTIONS, SCORE_TO_RANK,
                        fetch_symbol_history, _calc_oos_metrics,
                        run_walkforward_grid, run_fullsample, _section)
 
@@ -342,8 +339,6 @@ def render_all_tab(is_mobile):
 # =============================================================================
 
 def _render_results(results, theme, rank_by, is_mobile, is_mc=False):
-    import portfolio
-    pos_c = portfolio.C_POS; neg_c = portfolio.C_NEG
     _bg3 = theme.get('bg3', '#0f172a'); _bdr = theme.get('border', '#1e293b')
     _txt = theme.get('text', '#e2e8f0'); _txt2 = theme.get('text2', '#94a3b8')
     _mut = theme.get('muted', '#475569')
@@ -613,5 +608,5 @@ def _render_ew_charts(sorted_results, theme, is_mobile):
         fig.update_yaxes(gridcolor=_grd, linecolor=_axl,
             tickfont=dict(color=_tk, size=8, family=FONTS), side='right')
 
-        st.plotly_chart(fig, use_container_width=True, config={
+        st.plotly_chart(fig, width='stretch', config={
             'scrollZoom': True, 'displayModeBar': False, 'responsive': True})

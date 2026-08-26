@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import logging
 
-from config import FUTURES_GROUPS, THEMES, SYMBOL_NAMES, FONTS, clean_symbol
+from config import THEMES, SYMBOL_NAMES, FONTS
 
 logger = logging.getLogger(__name__)
 
@@ -19,8 +19,8 @@ logger = logging.getLogger(__name__)
 C_POS = '#60a5fa'; C_NEG = '#fb7185'; C_TXT = '#e2e8f0'; C_TXT2 = '#94a3b8'
 C_MUTE = '#475569'; C_BG = '#0f172a'; C_HDR = '#0f172a'; C_BORDER = '#1e293b'
 C_GOLD = '#fbbf24'; C_EW = '#64748b'
-TH = f"padding:4px 8px;border-bottom:1px solid #1e293b;color:#f8fafc;font-weight:600;font-size:9px;text-transform:uppercase;letter-spacing:0.06em;"
-TD = f"padding:5px 8px;border-bottom:1px solid #1e293b22;"
+TH = "padding:4px 8px;border-bottom:1px solid #1e293b;color:#f8fafc;font-weight:600;font-size:9px;text-transform:uppercase;letter-spacing:0.06em;"
+TD = "padding:5px 8px;border-bottom:1px solid #1e293b22;"
 
 def _short(sym):
     return SYMBOL_NAMES.get(sym, sym.replace('=F','').replace('=X','').replace('.SI',''))
@@ -556,7 +556,7 @@ def render_ranking_table(grid, rank_by='win_rate'):
         eq_rebals = best_r.get('eq_n_rebals', '—')
         if eq:
             html += f"<tr><td colspan='14' style='border-bottom:1px solid {C_EW};padding:0;height:0'></td></tr>"
-            html += f"<tr style='background:rgba(100,116,139,0.06)'>"
+            html += "<tr style='background:rgba(100,116,139,0.06)'>"
             html += f"<td style='{TD}color:{C_MUTE}'>—</td>"
             html += f"<td style='{TD}color:{C_TXT};font-weight:700'>◆ Equal Weight (1/N)</td>"
             html += f"<td style='{TD}text-align:right;font-weight:700'>{_fc(eq['win_rate'],'pct')}</td>"
@@ -576,7 +576,7 @@ def render_ranking_table(grid, rank_by='win_rate'):
             best_m = items[0][1]
             higher_better = {'win_rate','sharpe','sortino','mar','r2','total_ret','ann_ret','ytd'}
             html += f"<tr><td colspan='14' style='border-bottom:1px solid {C_EW};padding:0;height:0'></td></tr>"
-            html += f"<tr style='background:rgba(251,191,36,0.06)'>"
+            html += "<tr style='background:rgba(251,191,36,0.06)'>"
             html += f"<td style='{TD}color:{C_GOLD}'>Δ</td>"
             html += f"<td style='{TD}color:{C_GOLD};font-weight:600'>★ vs Equal Weight</td>"
             for key, fmt in [('win_rate','pct'),('sharpe','f2'),('sortino','f2'),('mar','f2'),
@@ -711,7 +711,7 @@ def render_oos_chart(grid, approach_name):
     fig.update_yaxes(gridcolor='#1f1f1f', linecolor='#2a2a2a', tickfont=dict(size=9, color='#94a3b8', family=FONTS), side='right')
     fig.update_yaxes(tickprefix='$', tickformat='.2f', row=1, col=1)
     fig.update_yaxes(ticksuffix='%', row=2, col=1)
-    st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True, 'displayModeBar': False, 'responsive': True})
+    st.plotly_chart(fig, width='stretch', config={'scrollZoom': True, 'displayModeBar': False, 'responsive': True})
 
 # =============================================================================
 # DISPLAY: MONTHLY RETURNS

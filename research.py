@@ -5,13 +5,12 @@ Auto-pulls from Substack RSS. No manual maintenance.
 """
 
 import streamlit as st
-from streamlit.components.v1 import html as st_html
 import feedparser
 import re
 import logging
 import urllib.request
-from html import unescape as html_unescape
-from config import get_theme, FONTS
+from html import escape as html_escape, unescape as html_unescape
+from config import get_theme, FONTS, st_html
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +75,10 @@ def _fetch():
             except Exception:
                 pass
             out.append({
-                'title': title, 'sub': sub, 'url': getattr(e, 'link', ''),
-                'date': dt, 'tags': tags, 'rt': _read_time(content or sub),
+                'title': html_escape(title), 'sub': html_escape(sub),
+                'url': html_escape(getattr(e, 'link', ''), quote=True),
+                'date': html_escape(dt), 'tags': tags,
+                'rt': _read_time(content or sub),
             })
         return out
     except Exception as ex:
@@ -90,9 +91,9 @@ def _fetch():
 
 def render():
     t = get_theme()
-    bg  = t.get('bg', '#0f1117');  bg2 = t.get('bg2', '#0a0f1a')
+    bg2 = t.get('bg2', '#0a0f1a')
     bg3 = t.get('bg3', '#0f172a'); bdr = t.get('border', '#1e293b')
-    txt = t.get('text', '#e2e8f0'); txt2 = t.get('text2', '#94a3b8')
+    txt = t.get('text', '#e2e8f0')
     mut = t.get('muted', '#475569'); acc = t.get('accent', '#4ade80')
 
     articles = _fetch()
@@ -135,6 +136,7 @@ def render():
             <div style="font-size:11px;color:{mut}">No articles yet — publish on Substack to populate</div>
         </div>"""
 
+    list_h = 650
     body = f"""
     <div>
         <div style="display:flex;justify-content:space-between;align-items:center;
@@ -151,7 +153,9 @@ def render():
             </a>
         </div>
         <div style="border:1px solid {bdr};border-radius:4px;overflow:hidden">
-            {rows if articles else empty}
+            <div style="max-height:{list_h}px;overflow-y:auto">
+                {rows if articles else empty}
+            </div>
         </div>
     </div>"""
 
@@ -161,7 +165,7 @@ def render():
         "<style>"
         "* { margin:0; padding:0; box-sizing:border-box; }"
         f"body {{ background:transparent; font-family:{FONTS}; color:{txt}; }}"
-        f"a.row {{ text-decoration:none; display:block; }}"
+        "a.row { text-decoration:none; display:block; }"
         f"a.row:hover div:first-child {{ background:{bdr} !important; }}"
         f"::-webkit-scrollbar {{ width:4px; }}"
         f"::-webkit-scrollbar-track {{ background:{bg2}; }}"
@@ -171,6 +175,5 @@ def render():
         "</body></html>"
     )
 
-    h = 50 + max(n, 1) * 52
-    h = min(h, 700)
+    h = min(50 + max(n, 1) * 52, list_h + 50)
     st_html(page, height=h)

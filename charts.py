@@ -7,12 +7,10 @@ from dataclasses import dataclass
 import pytz
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import warnings
 import logging
 import feedparser
 from urllib.parse import quote
 from html import escape as html_escape
-import re
 
 from config import (FUTURES_GROUPS, THEMES, SYMBOL_NAMES, FONTS, clean_symbol)
 
@@ -714,7 +712,7 @@ def render_scanner_table(metrics, selected_symbol):
     _bdr = t.get('border', '#1e293b'); _bg3 = t.get('bg3', '#0f172a'); _mut = t.get('muted', '#475569')
     _row_alt = '#131d2e'
     th = f"padding:5px 8px;border-bottom:1px solid {_bdr};color:#f8fafc;font-weight:600;font-size:9px;text-transform:uppercase;letter-spacing:0.06em;text-align:center;"
-    td = f"padding:4px 8px;border:none;"
+    td = "padding:4px 8px;border:none;"
 
     # Compute shared height for scanner/bar chart alignment
     _n_rows = len(metrics)
@@ -788,8 +786,6 @@ def render_scanner_table(metrics, selected_symbol):
 
 def create_4_chart_grid(symbol, chart_type='line', mobile=False):
     zc = zone_colors(); t = get_theme()
-    display_symbol = clean_symbol(symbol)
-    full_name = SYMBOL_NAMES.get(symbol, symbol)
 
     live_price = None
     try:
@@ -932,6 +928,30 @@ def create_4_chart_grid(symbol, chart_type='line', mobile=False):
         if boundary_type in computed_levels:
             computed_levels[boundary_type]['rsi'] = rsi_value
 
+        # X-range: last data point at ~60% of visible chart width
+        xref = f'xaxis{chart_idx+1}' if chart_idx > 0 else 'xaxis'
+        last_bar = len(hist) - 1
+        if boundary_type == 'session':
+            # Show ~last 24h: for 15m bars that's ~96 bars
+            bars_24h = min(96, last_bar)
+            x_left = max(0, last_bar - bars_24h) - 2
+        else:
+            x_left = -2
+        x_right = x_left + int((last_bar - x_left) / 0.6)
+        fig.update_layout(**{xref: dict(range=[x_left, x_right])})
+
+        # Y-axis range — fit to visible data only
+        visible_start = max(0, x_left)
+        visible_hist = hist.iloc[visible_start:]
+        y_low_vals = visible_hist['Low'].dropna(); y_high_vals = visible_hist['High'].dropna()
+        if len(y_low_vals) > 10:
+            y_min = y_low_vals.quantile(0.005); y_max = y_high_vals.quantile(0.995)
+        else:
+            y_min = y_low_vals.min(); y_max = y_high_vals.max()
+        pad = (y_max - y_min) * 0.08
+        yref = f'yaxis{chart_idx+1}' if chart_idx > 0 else 'yaxis'
+        fig.update_layout(**{yref: dict(range=[y_min-pad, y_max+pad], side='right', tickfont=dict(size=9, color='#94a3b8'))})
+
         # MAs on weekly chart
         if boundary_type == 'year':
             ma_20 = hist['Close'].rolling(window=20).mean(); ma_40 = hist['Close'].rolling(window=40).mean()
@@ -1020,30 +1040,6 @@ def create_4_chart_grid(symbol, chart_type='line', mobile=False):
         if tick_indices:
             axis_name = f'xaxis{chart_idx+1}' if chart_idx > 0 else 'xaxis'
             fig.update_layout(**{axis_name: dict(tickmode='array', tickvals=tick_indices, ticktext=tick_labels, tickfont=dict(color='#e2e8f0', size=9))})
-
-        # X-range: last data point at ~60% of visible chart width
-        xref = f'xaxis{chart_idx+1}' if chart_idx > 0 else 'xaxis'
-        last_bar = len(hist) - 1
-        if boundary_type == 'session':
-            # Show ~last 24h: for 15m bars that's ~96 bars
-            bars_24h = min(96, last_bar)
-            x_left = max(0, last_bar - bars_24h) - 2
-        else:
-            x_left = -2
-        x_right = x_left + int((last_bar - x_left) / 0.6)
-        fig.update_layout(**{xref: dict(range=[x_left, x_right])})
-
-        # Y-axis range — fit to visible data only
-        visible_start = max(0, x_left)
-        visible_hist = hist.iloc[visible_start:]
-        y_low_vals = visible_hist['Low'].dropna(); y_high_vals = visible_hist['High'].dropna()
-        if len(y_low_vals) > 10:
-            y_min = y_low_vals.quantile(0.005); y_max = y_high_vals.quantile(0.995)
-        else:
-            y_min = y_low_vals.min(); y_max = y_high_vals.max()
-        pad = (y_max - y_min) * 0.08
-        yref = f'yaxis{chart_idx+1}' if chart_idx > 0 else 'yaxis'
-        fig.update_layout(**{yref: dict(range=[y_min-pad, y_max+pad], side='right', tickfont=dict(size=9, color='#94a3b8'))})
 
         pd_dec = 4 if '=X' in symbol else 2
 
@@ -1501,7 +1497,7 @@ def render_charts_tab(is_mobile, est):
         with st.spinner('Loading charts...'):
             try:
                 fig, levels = create_4_chart_grid(st.session_state.symbol, st.session_state.chart_type, mobile=True)
-                st.plotly_chart(fig, use_container_width=True, config={'scrollZoom': True, 'displayModeBar': False, 'responsive': True})
+                st.plotly_chart(fig, width='stretch', config={'scrollZoom': True, 'displayModeBar': False, 'responsive': True})
             except Exception as e:
                 st.error(f"Chart error: {str(e)}"); levels = {}
         render_key_levels(st.session_state.symbol, levels)
@@ -1527,7 +1523,7 @@ def render_charts_tab(is_mobile, est):
         # ── 2x2 Chart grid below, full width ──
         st.markdown(_chart_hdr, unsafe_allow_html=True)
         if chart_ok:
-            st.plotly_chart(fig, use_container_width=True, config={
+            st.plotly_chart(fig, width='stretch', config={
                 'scrollZoom': True, 'displayModeBar': False,
                 'responsive': True})
 
@@ -1560,9 +1556,6 @@ def create_single_asset_chart(symbol, chart_type, interval, boundary_type, mobil
             live_price = float(hist_lag['Close'].iloc[-1])
     except Exception:
         pass
-
-    label_map = {cfg[1]: cfg[0] for cfg in CHART_CONFIGS}  # interval → label
-    bt_label = {v[1]: k for k, v in SCANNER_TF_OPTIONS.items()}
 
     fig = make_subplots(rows=1, cols=1)
 
@@ -1930,7 +1923,7 @@ def render_scanner_levels_table(symbols, interval, boundary_type, selected_secto
     html += "</tr>"
 
     # DIST row — % to nearest level
-    html += f"<tr>"
+    html += "<tr>"
     html += f"<td style='{td};text-align:left;color:{_mut};font-weight:700'>DIST</td>"
     for sym in symbols:
         lv = all_levels.get(sym, {})
@@ -2022,7 +2015,7 @@ def render_scanner_charts_tab(is_mobile, est):
                     try:
                         fig, zone_status = create_single_asset_chart(
                             sym, chart_type, interval, boundary_type, mobile=is_mobile)
-                        st.plotly_chart(fig, use_container_width=True,
+                        st.plotly_chart(fig, width='stretch',
                             config={'scrollZoom': True, 'displayModeBar': False, 'responsive': True})
                     except Exception as e:
                         st.error(f"{clean_symbol(sym)}: {e}")

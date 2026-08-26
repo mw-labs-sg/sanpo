@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import logging
 
-from config import FUTURES_GROUPS, THEMES, SYMBOL_NAMES, FONTS, clean_symbol
+from config import FUTURES_GROUPS, SYMBOL_NAMES, FONTS, clean_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -304,7 +304,7 @@ def render_spread_charts(pairs, data, theme, mobile=False):
     fig.update_yaxes(gridcolor=_grd, linecolor=_axl,
         tickfont=dict(color=_tk, size=8, family=FONTS), side='right')
 
-    st.plotly_chart(fig, use_container_width=True, config={
+    st.plotly_chart(fig, width='stretch', config={
         'scrollZoom': True, 'displayModeBar': False, 'responsive': True})
 
 # =============================================================================

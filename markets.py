@@ -12,9 +12,8 @@ import pandas as pd
 from datetime import datetime
 import pytz
 import logging
-from streamlit.components.v1 import html as st_html
 
-from config import THEMES, FONTS, FUTURES_GROUPS, SYMBOL_NAMES
+from config import THEMES, FONTS, FUTURES_GROUPS, sym_name, st_html, sort_val
 
 logger = logging.getLogger(__name__)
 
@@ -132,10 +131,16 @@ def fetch_periods(tickers_tuple):
                 day = ((price - prev) / prev * 100) if prev else None
 
                 def pct_from(start_ts):
-                    sub = s[s.index >= start_ts]
-                    if len(sub) < 1:
-                        return None
-                    base = float(sub.iloc[0])
+                    # Base is the last close BEFORE the period opens, so a
+                    # WTD/MTD/QTD/YTD figure includes the period's first day.
+                    before = s[s.index < start_ts]
+                    if len(before):
+                        base = float(before.iloc[-1])
+                    else:
+                        sub = s[s.index >= start_ts]
+                        if len(sub) < 1:
+                            return None
+                        base = float(sub.iloc[0])
                     return ((price - base) / base * 100) if base else None
 
                 results[ticker] = {
@@ -176,8 +181,8 @@ def _format_price(p, ticker):
 
 def _centre_bar(val, max_abs, pos_c, neg_c, bar_bg):
     centre_line = (
-        f"<div style='position:absolute;left:50%;top:0;width:1px;"
-        f"height:100%;background:#2d3f55;z-index:2'></div>"
+        "<div style='position:absolute;left:50%;top:0;width:1px;"
+        "height:100%;background:#2d3f55;z-index:2'></div>"
     )
     if val is None or pd.isna(val) or max_abs == 0:
         return (
@@ -222,7 +227,7 @@ def _resolve_layout(group_name):
     if group_name in REGIONAL_GROUPS:
         return True, REGIONAL_GROUPS[group_name]
     syms = FUTURES_GROUPS.get(group_name, [])
-    flat = [(s, SYMBOL_NAMES.get(s, s)) for s in syms]
+    flat = [(s, sym_name(s)) for s in syms]
     return False, flat
 
 
@@ -297,7 +302,7 @@ def _build_panel(data, period_key, group_name):
             )
             sorted_pairs = sorted(
                 pairs,
-                key=lambda x: data.get(x[0], {}).get(period_key) or -999,
+                key=lambda x: sort_val(data.get(x[0], {}).get(period_key)),
                 reverse=True,
             )
             for i, (ticker, name) in enumerate(sorted_pairs):
@@ -305,7 +310,7 @@ def _build_panel(data, period_key, group_name):
     else:
         sorted_layout = sorted(
             layout,
-            key=lambda x: data.get(x[0], {}).get(period_key) or -999,
+            key=lambda x: sort_val(data.get(x[0], {}).get(period_key)),
             reverse=True,
         )
         for i, (ticker, name) in enumerate(sorted_layout):
@@ -354,7 +359,7 @@ def render_markets_tab(is_mobile):
             unsafe_allow_html=True,
         )
         group = st.selectbox(
-            'mkt_group', group_options,
+            'Group', group_options,
             index=0, key='mkt_group_sel', label_visibility='collapsed',
         )
     with col_per:
@@ -364,7 +369,7 @@ def render_markets_tab(is_mobile):
             unsafe_allow_html=True,
         )
         period_label = st.selectbox(
-            'mkt_period', list(PERIOD_OPTIONS.keys()),
+            'Period', list(PERIOD_OPTIONS.keys()),
             index=0, key='mkt_period_sel', label_visibility='collapsed',
         )
     period_key = PERIOD_OPTIONS[period_label]

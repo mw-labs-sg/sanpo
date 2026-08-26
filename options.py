@@ -7,7 +7,6 @@ Data via yfinance (equity/ETF options — no futures options).
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import logging
@@ -21,6 +20,7 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 
 @st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def _fetch_expiries(symbol):
     try:
         return list(yf.Ticker(symbol).options)
@@ -133,9 +133,9 @@ def _render_chain_table(calls, puts, price, theme):
         s = r['strike']
         itm_call = s <= price; itm_put = s >= price
         is_atm = abs(s - price) / price < 0.005
-        row_bg = f'rgba(74,222,128,0.08)' if is_atm else 'transparent'
-        c_bg = f'rgba(74,222,128,0.04)' if itm_call else 'transparent'
-        p_bg = f'rgba(245,158,11,0.04)' if itm_put else 'transparent'
+        row_bg = 'rgba(74,222,128,0.08)' if is_atm else 'transparent'
+        c_bg = 'rgba(74,222,128,0.04)' if itm_call else 'transparent'
+        p_bg = 'rgba(245,158,11,0.04)' if itm_put else 'transparent'
         strike_c = '#f8fafc' if is_atm else _txt2
 
         c_iv = f"{r['c_iv']*100:.0f}%" if r['c_iv'] > 0 else '—'
@@ -192,7 +192,7 @@ def _render_iv_skew(calls, puts, price, theme):
         yaxis_title='IV %', xaxis_title='Strike')
     fig.update_xaxes(gridcolor=_grd, tickfont=dict(color='#888', size=9, family=FONTS))
     fig.update_yaxes(gridcolor=_grd, tickfont=dict(color='#888', size=9, family=FONTS), side='right')
-    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+    st.plotly_chart(fig, width='stretch', config={'displayModeBar': False})
 
 
 def _render_oi_volume(calls, puts, price, theme):
@@ -224,7 +224,7 @@ def _render_oi_volume(calls, puts, price, theme):
     fig.update_yaxes(gridcolor=_grd, tickfont=dict(color='#888', size=9, family=FONTS), side='right')
     for ann in fig['layout']['annotations']:
         ann['font'] = dict(size=10, family=FONTS, color='#94a3b8')
-    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+    st.plotly_chart(fig, width='stretch', config={'displayModeBar': False})
 
 
 def _render_term_structure(symbol, theme):
@@ -260,7 +260,7 @@ def _render_term_structure(symbol, theme):
         yaxis_title='IV %', xaxis_title='Days to Expiry')
     fig.update_xaxes(gridcolor=_grd, tickfont=dict(color='#888', size=9, family=FONTS))
     fig.update_yaxes(gridcolor=_grd, tickfont=dict(color='#888', size=9, family=FONTS), side='right')
-    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+    st.plotly_chart(fig, width='stretch', config={'displayModeBar': False})
 
 
 # =============================================================================

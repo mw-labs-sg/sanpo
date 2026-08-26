@@ -83,7 +83,7 @@ def fetch_feed(name, url, max_items=5):
                     dt = parsedate_to_datetime(pub)
                     date_str = dt.strftime('%d %b %Y %H:%M')
                     sort_key = dt.isoformat()
-                except:
+                except Exception:
                     date_str = pub[:16]
             items.append({
                 'source': name,

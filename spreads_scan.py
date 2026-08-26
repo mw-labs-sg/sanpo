@@ -6,7 +6,7 @@ import logging
 
 from config import FUTURES_GROUPS, THEMES, SYMBOL_NAMES, FONTS, clean_symbol
 from spreads import (LOOKBACK_OPTIONS, fetch_sector_spread_data,
-                     compute_sector_spreads, sort_spread_pairs)
+                     compute_sector_spreads)
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,6 @@ SCAN_SORT_KEYS = {
 def render_scan_tab(is_mobile):
     theme_name = st.session_state.get('theme', 'Dark')
     theme = THEMES.get(theme_name, THEMES['Dark'])
-    pos_c = theme['pos']
     _lbl = f"color:#e2e8f0;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;font-family:{FONTS}"
     _bg3 = theme.get('bg3', '#0f172a'); _mut = theme.get('muted', '#475569')
     ann_factor = 252
@@ -174,7 +173,7 @@ def _render_scan_table(sorted_results, theme):
         score = p.get('_score', 0)
         sc_c = pos_c if score <= 3 else (_txt2 if score <= 6 else _mut)
         is_top3 = rank <= 3
-        bg = f'rgba(74,222,128,0.06)' if is_top3 else 'transparent'
+        bg = 'rgba(74,222,128,0.06)' if is_top3 else 'transparent'
         fw = '700' if is_top3 else '500'
         gc = pos_c if is_top3 else _txt
         html += f"""<tr style='background:{bg}'>
@@ -300,5 +299,5 @@ def _render_scan_charts(sorted_results, lookback_days, ann_factor, theme, is_mob
         fig.update_yaxes(gridcolor=_grd, linecolor=_axl,
             tickfont=dict(color=_tk, size=8, family=FONTS), side='right')
 
-        st.plotly_chart(fig, use_container_width=True, config={
+        st.plotly_chart(fig, width='stretch', config={
             'scrollZoom': True, 'displayModeBar': False, 'responsive': True})

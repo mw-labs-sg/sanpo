@@ -12,9 +12,8 @@ import logging
 import base64
 import requests
 import json
-from streamlit.components.v1 import html as st_html
 
-from config import THEMES, FONTS
+from config import THEMES, FONTS, st_html, sort_val
 
 logger = logging.getLogger(__name__)
 
@@ -139,16 +138,19 @@ PRIVATE_COMPANIES = [
 
 
 def _export_to_github(companies, prices):
-    """Silently write private.json to GitHub after fetching data."""
+    """Write private.json to GitHub — only when the data actually changed.
+
+    Streamlit re-runs every tab on every interaction, so calling the API
+    directly here meant a GET + PUT (and a commit) per script run. The payload
+    is built without a timestamp so it can key a cache, and the push only fires
+    on a genuine content change (or hourly).
+    """
     try:
         token = st.secrets.get("GITHUB_TOKEN", "")
         if not token:
             return
-        sgt = pytz.timezone('Asia/Singapore')
-        now_str = datetime.now(sgt).isoformat()
 
         data = {
-            'updated': now_str,
             'source': 'SANPO Private Companies',
             'count': len(companies),
             'companies': []
@@ -162,8 +164,8 @@ def _export_to_github(companies, prices):
             data['companies'].append({
                 'symbol': ticker,
                 'name': company,
-                'price': round(price, 4) if price else None,
-                'price_52w_pct': round(ytd, 2) if ytd else None,
+                'price': round(price, 4) if price is not None else None,
+                'price_52w_pct': round(ytd, 2) if ytd is not None else None,
                 'valuation_b': val_b,
                 'total_raised_b': raised_b,
                 'latest_date': latest_date,
@@ -171,6 +173,26 @@ def _export_to_github(companies, prices):
                 'round': round_class,
                 'sector': sector,
             })
+
+        _push_private_json(json.dumps(data, indent=2, ensure_ascii=False))
+
+    except Exception as e:
+        logger.warning(f"GitHub export error: {e}")
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _push_private_json(body_json):
+    """Commit private.json. Cached on body_json so unchanged data is a no-op.
+
+    The token is read here rather than passed in, to keep it out of the cache key.
+    """
+    try:
+        token = st.secrets.get("GITHUB_TOKEN", "")
+        if not token:
+            return
+        sgt = pytz.timezone('Asia/Singapore')
+        data = json.loads(body_json)
+        data['updated'] = datetime.now(sgt).isoformat()
 
         url = "https://api.github.com/repos/YureiKara/sanpo/contents/private.json"
         headers = {
@@ -189,9 +211,8 @@ def _export_to_github(companies, prices):
         if sha:
             payload["sha"] = sha
         requests.put(url, headers=headers, json=payload, timeout=10)
-
     except Exception as e:
-        logger.warning(f"GitHub export error: {e}")
+        logger.warning(f"GitHub push error: {e}")
 
 
 @st.cache_data(ttl=600, max_entries=3, show_spinner=False)
@@ -263,12 +284,11 @@ def _build_table(data, sort_by):
     bg2 = t.get('bg2', '#0a0f1a')
     bg3 = t.get('bg3', '#0f172a')
     bdr = t.get('border', '#1e293b')
-    mut = t.get('muted', '#475569')
     acc = t.get('accent', '#4ade80')
 
     rows = list(PRIVATE_COMPANIES)
     if sort_by == '52W %':
-        rows.sort(key=lambda x: data.get(x[0], {}).get('ytd') or -999, reverse=True)
+        rows.sort(key=lambda x: sort_val(data.get(x[0], {}).get('ytd')), reverse=True)
     elif sort_by == 'Valuation':
         rows.sort(key=lambda x: x[2], reverse=True)
     elif sort_by == 'Total Raised':
@@ -303,7 +323,7 @@ def _build_table(data, sort_by):
         price = d.get('price')
         ytd   = d.get('ytd')
 
-        price_str      = f"${price:,.2f}" if price else '—'
+        price_str      = f"${price:,.2f}" if price is not None else '—'
         ytd_str, ytd_c = _fmt_pct(ytd)
         val_str        = _fmt_val(val_b)
         raised_str     = _fmt_val(raised_b)
@@ -354,15 +374,13 @@ def _wrap(body, height):
 
 
 def render_private_tab(is_mobile):
-    t   = get_theme()
-    mut = t.get('muted', '#475569')
     sgt = pytz.timezone('Asia/Singapore')
     now_str = datetime.now(sgt).strftime('%d %b %Y %H:%M SGT')
 
     col_sort, col_spacer, col_ts = st.columns([1, 4, 1])
     with col_sort:
         st.markdown(f"<div style='font-size:9px;font-weight:700;color:#e2e8f0;font-family:{FONTS};text-transform:uppercase;letter-spacing:0.08em;margin-bottom:-18px'>SORT BY</div>", unsafe_allow_html=True)
-        sort_by = st.selectbox('sort_private', ['Valuation', '52W %', 'Total Raised', 'Latest Date', 'Round', 'Sector'], key='private_sort', label_visibility='collapsed')
+        sort_by = st.selectbox('Sort by', ['Valuation', '52W %', 'Total Raised', 'Latest Date', 'Round', 'Sector'], key='private_sort', label_visibility='collapsed')
     with col_ts:
         st.markdown(f"<div style='font-size:9px;color:#f8fafc;font-family:{FONTS};padding:28px 0 0 0;text-align:right'>Updated: {now_str}</div>", unsafe_allow_html=True)
 
