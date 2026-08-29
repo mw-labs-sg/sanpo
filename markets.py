@@ -182,7 +182,7 @@ def _format_price(p, ticker):
 def _centre_bar(val, max_abs, pos_c, neg_c, bar_bg):
     centre_line = (
         "<div style='position:absolute;left:50%;top:0;width:1px;"
-        "height:100%;background:#2d3f55;z-index:2'></div>"
+        "height:100%;background:#4a4a4a;z-index:2'></div>"
     )
     if val is None or pd.isna(val) or max_abs == 0:
         return (

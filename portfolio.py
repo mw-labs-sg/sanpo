@@ -16,11 +16,14 @@ logger = logging.getLogger(__name__)
 # CONSTANTS
 # =============================================================================
 
-C_POS = '#60a5fa'; C_NEG = '#fb7185'; C_TXT = '#e2e8f0'; C_TXT2 = '#94a3b8'
-C_MUTE = '#475569'; C_BG = '#0f172a'; C_HDR = '#0f172a'; C_BORDER = '#1e293b'
-C_GOLD = '#fbbf24'; C_EW = '#64748b'
-TH = "padding:4px 8px;border-bottom:1px solid #1e293b;color:#f8fafc;font-weight:600;font-size:9px;text-transform:uppercase;letter-spacing:0.06em;"
-TD = "padding:5px 8px;border-bottom:1px solid #1e293b22;"
+# Series colours (data-carrying) stay as they are; surfaces and text follow the
+# neutral charcoal ramp in config.THEMES. C_MUTE was #475569, near-invisible on
+# a #212121 page.
+C_POS = '#60a5fa'; C_NEG = '#fb7185'; C_TXT = '#ececec'; C_TXT2 = '#afafaf'
+C_MUTE = '#8f8f8f'; C_BG = '#1a1a1a'; C_HDR = '#2a2a2a'; C_BORDER = '#333333'
+C_GOLD = '#fbbf24'; C_EW = '#8f8f8f'
+TH = "padding:4px 8px;border-bottom:1px solid #333333;color:#f8fafc;font-weight:600;font-size:9px;text-transform:uppercase;letter-spacing:0.06em;"
+TD = "padding:5px 8px;border-bottom:1px solid #33333322;"
 
 def _short(sym):
     return SYMBOL_NAMES.get(sym, sym.replace('=F','').replace('=X','').replace('.SI',''))

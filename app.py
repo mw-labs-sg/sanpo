@@ -22,19 +22,23 @@ st.set_page_config(page_title="SANPO", layout="wide", initial_sidebar_state="col
 def _inject_theme_css():
     t = get_theme()
     is_light = t.get('mode') == 'light'
-    bg = t.get('bg', '#0f1117'); bg3 = t.get('bg3', '#0f172a'); bdr = t.get('border', '#1e293b')
-    grad = t.get('bg_gradient', '')
-    txt = t.get('text', '#e2e8f0'); accent = t.get('accent', '#4ade80')
-    sb_bg = '#f1f5f9' if is_light else '#1a2744'
-    sel_bg = '#f1f5f9' if is_light else '#1a2744'
-    sel_c = '#334155' if is_light else '#b0b0b0'
-    sel_bdr = '#e2e8f0' if is_light else '#1e293b'
+    bg = t.get('bg', '#212121'); bg2 = t.get('bg2', '#1a1a1a'); bg3 = t.get('bg3', '#2a2a2a')
+    bdr = t.get('border', '#333333')
+    grad = t.get('bg_gradient', 'none')
+    txt = t.get('text', '#ececec'); txt2 = t.get('text2', '#afafaf')
+    accent = t.get('accent', '#4ade80')
+    # Widget chrome reads from the theme rather than hardcoded hexes, so the
+    # palette really does live in one place (these were navy #1a2744).
+    sb_bg = '#f1f5f9' if is_light else bg2
+    sel_bg = '#f1f5f9' if is_light else bg3
+    sel_c = '#334155' if is_light else txt2
+    sel_bdr = '#e2e8f0' if is_light else bdr
     tab_bdr = bdr
-    tab_c = '#64748b' if is_light else '#7a8a9e'
-    tab_sel_c = '#0f172a' if is_light else '#f1f5f9'
-    radio_bg = bg3 if is_light else '#1a2744'
+    tab_c = '#64748b' if is_light else txt2
+    tab_sel_c = '#0f172a' if is_light else txt
+    radio_bg = bg3
     radio_bdr = bdr
-    btn_bg = bg3 if is_light else '#1a2744'
+    btn_bg = bg3
     btn_c = txt
     st.markdown(f"""
 <style>

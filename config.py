@@ -173,22 +173,19 @@ THEMES = {
         'zone_hi': '#4ade80', 'zone_amid': '#86efac', 'zone_bmid': '#fbbf24', 'zone_lo': '#f59e0b',
         'str_up': '#4ade80', 'str_dn': '#f59e0b', 'pull': '#fbbf24', 'bnce': '#93c5fd',
         'long': '#4ade80', 'short': '#f59e0b',
-        'bg': '#0f1117', 'bg2': '#0a0f1a', 'bg3': '#0f172a',
-        'border': '#1e293b', 'text': '#e2e8f0', 'text2': '#94a3b8', 'muted': '#475569',
+        # Neutral charcoal ramp, matching ChatGPT's dark UI. Deliberately
+        # desaturated (R=G=B) so the green/amber P&L colours carry all the hue.
+        'bg': '#212121',      # page      (ChatGPT main surface)
+        'bg2': '#1a1a1a',     # recessed panels
+        'bg3': '#2a2a2a',     # raised rows, cards, widgets
+        'border': '#333333',
+        'text': '#ececec', 'text2': '#afafaf', 'muted': '#8f8f8f',
         'accent': '#4ade80',
-        # Page backdrop. `bg` stays the flat fallback (and the value mirrored in
-        # .streamlit/config.toml); `bg_gradient` is layered over it on .stApp.
-        # Three low-alpha glows over a cool navy-charcoal diagonal: green at the
-        # top-left to pick up the logo, cyan top-right, indigo lifting the fold.
-        'bg_gradient': (
-            'radial-gradient(1100px 620px at 8% -12%, rgba(74,222,128,0.10), transparent 58%),'
-            'radial-gradient(950px 640px at 94% 2%, rgba(56,189,248,0.075), transparent 60%),'
-            'radial-gradient(1000px 560px at 45% 108%, rgba(129,140,248,0.06), transparent 58%),'
-            'linear-gradient(165deg, #121826 0%, #0d1119 46%, #0a0d13 100%)'
-        ),
-        # Transparent so Plotly panels float on the gradient instead of punching
-        # opaque rectangles through it.
-        'plot_bg': 'rgba(0,0,0,0)', 'grid': '#1a1f2e', 'axis_line': '#2a2a2a', 'tick': '#888888',
+        # Flat, like ChatGPT — no gradient. Set this to a CSS gradient string to
+        # layer one over `bg` on .stApp; 'none' keeps the flat fill.
+        'bg_gradient': 'none',
+        # Transparent so Plotly panels sit directly on the page colour.
+        'plot_bg': 'rgba(0,0,0,0)', 'grid': '#333333', 'axis_line': '#3a3a3a', 'tick': '#8f8f8f',
     },
 }
 
@@ -252,5 +249,5 @@ def surface():
             bar_bg=bdr, row_alt=bg3, hm_txt=txt)
     return dict(bg=bg, bg2=bg2, bg3=bg3, card=bg3,
         border=bdr, text=txt, text2=txt2, muted=muted,
-        off_dot='#3a3a3a', off_name='#4a5568', link='#c9d1d9',
-        bar_bg=bg3, row_alt='#0d1321', hm_txt=txt)
+        off_dot='#3a3a3a', off_name='#6b6b6b', link=txt,
+        bar_bg=bg3, row_alt='#242424', hm_txt=txt)

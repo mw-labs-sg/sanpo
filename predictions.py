@@ -353,9 +353,10 @@ def _build_table(markets, theme, sort_by='Volume'):
 
 def _wrap(body, height):
     t   = get_theme()
-    bg2 = t.get('bg2', '#0a0f1a')
-    bdr = t.get('border', '#1e293b')
-    txt = t.get('text', '#e2e8f0')
+    bg2 = t.get('bg2', '#1a1a1a')
+    bg3 = t.get('bg3', '#2a2a2a')
+    bdr = t.get('border', '#333333')
+    txt = t.get('text', '#ececec')
     return (
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
         "<link href='https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap' rel='stylesheet'>"
@@ -365,7 +366,7 @@ def _wrap(body, height):
         f"::-webkit-scrollbar {{ width:4px; }}"
         f"::-webkit-scrollbar-track {{ background:{bg2}; }}"
         f"::-webkit-scrollbar-thumb {{ background:{bdr}; border-radius:2px; }}"
-        "a:hover > div { background:#1a2744 !important; }"
+        f"a:hover > div {{ background:{bg3} !important; }}"
         "</style></head><body>"
         f"<div style='height:{height}px;overflow-y:auto;overflow-x:hidden'>{body}</div>"
         "</body></html>"
