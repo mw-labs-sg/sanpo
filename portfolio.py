@@ -699,7 +699,7 @@ def render_oos_chart(grid, approach_name):
     mode_tag = 'FULL SAMPLE (IN-SAMPLE)' if is_fullsample else 'OOS WALK-FORWARD'
     tag_color = '#60a5fa' if is_fullsample else C_GOLD
     fig.update_layout(template='plotly_dark', height=400, margin=dict(l=55, r=55, t=35, b=25),
-        plot_bgcolor='#121212', paper_bgcolor='#121212', showlegend=True,
+        plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', showlegend=True,
         legend=dict(x=0.01, y=0.88, bgcolor='rgba(0,0,0,0)',
                     font=dict(size=12, color='#ffffff', family=FONTS), borderwidth=0),
         hovermode='x unified', font=dict(family=FONTS))

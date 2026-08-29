@@ -23,6 +23,7 @@ def _inject_theme_css():
     t = get_theme()
     is_light = t.get('mode') == 'light'
     bg = t.get('bg', '#0f1117'); bg3 = t.get('bg3', '#0f172a'); bdr = t.get('border', '#1e293b')
+    grad = t.get('bg_gradient', '')
     txt = t.get('text', '#e2e8f0'); accent = t.get('accent', '#4ade80')
     sb_bg = '#f1f5f9' if is_light else '#1a2744'
     sel_bg = '#f1f5f9' if is_light else '#1a2744'
@@ -38,8 +39,18 @@ def _inject_theme_css():
     st.markdown(f"""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Orbitron:wght@500;700&display=swap');
-    .stApp {{ background-color: {bg}; font-family: 'Inter', sans-serif; }}
-    header[data-testid="stHeader"] {{ background-color: {bg}; }}
+    .stApp {{
+        background-color: {bg};
+        background-image: {grad};
+        background-attachment: fixed;
+        background-repeat: no-repeat;
+        background-size: cover;
+        font-family: 'Inter', sans-serif;
+    }}
+    header[data-testid="stHeader"] {{ background: transparent; }}
+    .main .block-container, [data-testid="stAppViewContainer"] {{ background: transparent; }}
+    /* Plotly panels are transparent now, so they read as part of the backdrop. */
+    .js-plotly-plot .plot-container, .stPlotlyChart {{ background: transparent !important; }}
     [data-testid="stSidebar"] {{ background-color: {sb_bg}; }}
     .stSelectbox > div > div {{ background-color: {sel_bg}; color: {sel_c}; font-family: 'Inter', sans-serif; border: 1px solid {sel_bdr}; }}
     .stTextInput > div > div > input {{ font-family: 'Inter', sans-serif; }}
@@ -64,6 +75,9 @@ def _inject_theme_css():
     @media (max-width: 768px) {{
         .block-container {{ padding: 2.5rem 0.5rem 0 0.5rem !important; }}
         .stButton > button {{ font-size: 9px !important; padding: 2px 4px !important; min-height: 24px !important; }}
+        /* iOS Safari mishandles background-attachment:fixed (blank or jumping
+           backdrop on scroll), so pin the gradient to the page instead. */
+        .stApp {{ background-attachment: scroll; }}
     }}
     #MainMenu {{visibility: hidden;}}
     footer {{visibility: hidden;}}
