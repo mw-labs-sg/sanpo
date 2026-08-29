@@ -468,7 +468,7 @@ def fetch_sector_data(sector_name, symbols_override=None):
             if not batch_daily.empty:
                 if isinstance(batch_daily.columns, pd.MultiIndex):
                     if symbol in batch_daily.columns.get_level_values(0):
-                        hist_yearly = batch_daily[symbol].dropna(how='all')
+                        hist_yearly = batch_daily[symbol].dropna(subset=['Close'])
                 else:
                     # Single-symbol download returns flat columns
                     hist_yearly = batch_daily.copy()
@@ -710,7 +710,7 @@ def render_scanner_table(metrics, selected_symbol):
         return f"{conf} <span style='color:{sc};font-size:9px;font-weight:600'>{sig}</span>"
 
     _bdr = t.get('border', '#1e293b'); _bg3 = t.get('bg3', '#0f172a'); _mut = t.get('muted', '#475569')
-    _row_alt = '#131d2e'
+    _row_alt = t.get('bg3', '#2a2a2a')
     th = f"padding:5px 8px;border-bottom:1px solid {_bdr};color:#f8fafc;font-weight:600;font-size:9px;text-transform:uppercase;letter-spacing:0.06em;text-align:center;"
     td = "padding:4px 8px;border:none;"
 

@@ -39,8 +39,8 @@ def _s():
         return dict(
             bg=bg, bg2=bg2, bg3=bg3, card=bg3,
             border=bdr, text=txt, text2=txt2, muted=muted,
-            off_dot='#3a3a3a', off_name='#4a5568', link='#c9d1d9',
-            bar_bg=bg3, row_alt='#131d2e', hm_txt=txt,
+            off_dot='#3a3a3a', off_name='#6b6b6b', link=txt,
+            bar_bg=bg3, row_alt='#242424', hm_txt=txt,
         )
 
 
@@ -120,7 +120,7 @@ def _fetch_pulse_batch():
             elif len(all_syms) == 1:
                 hist = batch.copy()
             elif sym in batch.columns.get_level_values(0):
-                hist = batch[sym].dropna(how='all')
+                hist = batch[sym].dropna(subset=['Close'])
             else:
                 hist = yf.Ticker(sym).history(period='5d')
             if hist.empty:
@@ -190,7 +190,7 @@ def _fetch_breakout_data():
             elif len(batch_syms) == 1:
                 hist = batch.copy()
             elif sym in batch.columns.get_level_values(0):
-                hist = batch[sym].dropna(how='all')
+                hist = batch[sym].dropna(subset=['Close'])
             else:
                 hist = yf.Ticker(sym).history(period='2y')
 
