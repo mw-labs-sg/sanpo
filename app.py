@@ -22,9 +22,9 @@ st.set_page_config(page_title="SANPO", layout="wide", initial_sidebar_state="col
 def _inject_theme_css():
     t = get_theme()
     is_light = t.get('mode') == 'light'
-    bg = t.get('bg', '#080e1a'); bg2 = t.get('bg2', 'rgba(4,8,16,0.46)')
-    wbg = t.get('widget_bg', '#152339')
-    bdr = t.get('border', '#223353')
+    bg = t.get('bg', '#04070f'); bg2 = t.get('bg2', 'rgba(4,8,16,0.46)')
+    wbg = t.get('widget_bg', '#111d31')
+    bdr = t.get('border', '#1e2e4c')
     grad = t.get('bg_gradient', 'none')
     txt = t.get('text', '#e2e8f0'); txt2 = t.get('text2', '#9fb2ca')
     accent = t.get('accent', '#4ade80')

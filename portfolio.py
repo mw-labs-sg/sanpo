@@ -20,11 +20,11 @@ logger = logging.getLogger(__name__)
 # neutral charcoal ramp in config.THEMES. C_MUTE was #475569, near-invisible on
 # a #212121 page.
 C_POS = '#60a5fa'; C_NEG = '#fb7185'; C_TXT = '#e2e8f0'; C_TXT2 = '#9fb2ca'
-C_MUTE = '#8b9db8'; C_BG = 'rgba(4,8,16,0.46)'; C_HDR = 'rgba(18,33,60,0.40)'
-C_BORDER = '#223353'
-C_GOLD = '#fbbf24'; C_EW = '#8b9db8'
-TH = "padding:4px 8px;border-bottom:1px solid #223353;color:#f8fafc;font-weight:600;font-size:9px;text-transform:uppercase;letter-spacing:0.06em;"
-TD = "padding:5px 8px;border-bottom:1px solid #22335322;"
+C_MUTE = '#9fb2ca'; C_BG = 'rgba(4,8,16,0.46)'; C_HDR = 'rgba(18,33,60,0.40)'
+C_BORDER = '#1e2e4c'
+C_GOLD = '#fbbf24'; C_EW = '#9fb2ca'
+TH = "padding:4px 8px;border-bottom:1px solid #1e2e4c;color:#f8fafc;font-weight:600;font-size:9px;text-transform:uppercase;letter-spacing:0.06em;"
+TD = "padding:5px 8px;border-bottom:1px solid #1e2e4c22;"
 
 def _short(sym):
     return SYMBOL_NAMES.get(sym, sym.replace('=F','').replace('=X','').replace('.SI',''))
