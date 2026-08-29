@@ -39,8 +39,8 @@ def _s():
         return dict(
             bg=bg, bg2=bg2, bg3=bg3, card=bg3,
             border=bdr, text=txt, text2=txt2, muted=muted,
-            off_dot='#3a3a3a', off_name='#6b6b6b', link=txt,
-            bar_bg=bg3, row_alt='#242424', hm_txt=txt,
+            off_dot='#3a4a63', off_name='#7d8fa8', link=txt,
+            bar_bg=bg3, row_alt='rgba(20,32,55,0.45)', hm_txt=txt,
         )
 
 

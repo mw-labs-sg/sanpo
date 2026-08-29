@@ -19,11 +19,12 @@ logger = logging.getLogger(__name__)
 # Series colours (data-carrying) stay as they are; surfaces and text follow the
 # neutral charcoal ramp in config.THEMES. C_MUTE was #475569, near-invisible on
 # a #212121 page.
-C_POS = '#60a5fa'; C_NEG = '#fb7185'; C_TXT = '#ececec'; C_TXT2 = '#afafaf'
-C_MUTE = '#8f8f8f'; C_BG = '#1a1a1a'; C_HDR = '#2a2a2a'; C_BORDER = '#333333'
-C_GOLD = '#fbbf24'; C_EW = '#8f8f8f'
-TH = "padding:4px 8px;border-bottom:1px solid #333333;color:#f8fafc;font-weight:600;font-size:9px;text-transform:uppercase;letter-spacing:0.06em;"
-TD = "padding:5px 8px;border-bottom:1px solid #33333322;"
+C_POS = '#60a5fa'; C_NEG = '#fb7185'; C_TXT = '#e2e8f0'; C_TXT2 = '#9fb2ca'
+C_MUTE = '#6b7f9c'; C_BG = 'rgba(9,15,29,0.58)'; C_HDR = 'rgba(28,45,76,0.52)'
+C_BORDER = '#28395a'
+C_GOLD = '#fbbf24'; C_EW = '#6b7f9c'
+TH = "padding:4px 8px;border-bottom:1px solid #28395a;color:#f8fafc;font-weight:600;font-size:9px;text-transform:uppercase;letter-spacing:0.06em;"
+TD = "padding:5px 8px;border-bottom:1px solid #28395a22;"
 
 def _short(sym):
     return SYMBOL_NAMES.get(sym, sym.replace('=F','').replace('=X','').replace('.SI',''))

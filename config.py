@@ -173,19 +173,28 @@ THEMES = {
         'zone_hi': '#4ade80', 'zone_amid': '#86efac', 'zone_bmid': '#fbbf24', 'zone_lo': '#f59e0b',
         'str_up': '#4ade80', 'str_dn': '#f59e0b', 'pull': '#fbbf24', 'bnce': '#93c5fd',
         'long': '#4ade80', 'short': '#f59e0b',
-        # Neutral charcoal ramp, matching ChatGPT's dark UI. Deliberately
-        # desaturated (R=G=B) so the green/amber P&L colours carry all the hue.
-        'bg': '#212121',      # page      (ChatGPT main surface)
-        'bg2': '#1a1a1a',     # recessed panels
-        'bg3': '#2a2a2a',     # raised rows, cards, widgets
-        'border': '#333333',
-        'text': '#ececec', 'text2': '#afafaf', 'muted': '#8f8f8f',
+        # Cool faded blue. `bg` is the flat fallback painted under the
+        # gradient (and mirrored in .streamlit/config.toml).
+        'bg': '#101a31',
+        # Panels and rows are SEMI-TRANSPARENT on purpose: opaque cards would
+        # cover the gradient and it would only show in the margins. These
+        # composite over the backdrop so the fade reads through the whole page.
+        'bg2': 'rgba(9,15,29,0.58)',      # recessed panels
+        'bg3': 'rgba(28,45,76,0.52)',     # raised rows, cards
+        'widget_bg': '#1b2c49',           # selects/buttons — kept opaque
+        # `border` must stay a 6-digit hex: several tabs append an alpha pair
+        # to it (e.g. f"1px solid {bdr}22").
+        'border': '#28395a',
+        'text': '#e2e8f0', 'text2': '#9fb2ca', 'muted': '#6b7f9c',
         'accent': '#4ade80',
-        # Flat, like ChatGPT — no gradient. Set this to a CSS gradient string to
-        # layer one over `bg` on .stApp; 'none' keeps the flat fill.
-        'bg_gradient': 'none',
-        # Transparent so Plotly panels sit directly on the page colour.
-        'plot_bg': 'rgba(0,0,0,0)', 'grid': '#333333', 'axis_line': '#3a3a3a', 'tick': '#8f8f8f',
+        'bg_gradient': (
+            'radial-gradient(1200px 720px at 18% -8%, rgba(59,130,246,0.20), transparent 62%),'
+            'radial-gradient(900px 620px at 92% 12%, rgba(56,189,248,0.12), transparent 58%),'
+            'linear-gradient(180deg, #0a0f1e 0%, #111c33 45%, #17263f 78%, #0e1626 100%)'
+        ),
+        # Transparent so Plotly panels sit on the gradient rather than punching
+        # opaque rectangles through it.
+        'plot_bg': 'rgba(0,0,0,0)', 'grid': '#22304a', 'axis_line': '#2c3d5c', 'tick': '#9fb2ca',
     },
 }
 
@@ -249,5 +258,5 @@ def surface():
             bar_bg=bdr, row_alt=bg3, hm_txt=txt)
     return dict(bg=bg, bg2=bg2, bg3=bg3, card=bg3,
         border=bdr, text=txt, text2=txt2, muted=muted,
-        off_dot='#3a3a3a', off_name='#6b6b6b', link=txt,
-        bar_bg=bg3, row_alt='#242424', hm_txt=txt)
+        off_dot='#3a4a63', off_name='#7d8fa8', link=txt,
+        bar_bg=bg3, row_alt='rgba(20,32,55,0.45)', hm_txt=txt)
