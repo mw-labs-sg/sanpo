@@ -3,6 +3,7 @@ import pytz
 import re
 import logging
 import warnings
+from pathlib import Path
 
 from config import get_theme, st_html
 
@@ -15,7 +16,15 @@ logger = logging.getLogger(__name__)
 warnings.filterwarnings('ignore')
 logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 
-st.set_page_config(page_title="SANPO", layout="wide", initial_sidebar_state="collapsed")
+# Browser tab icon. Absolute path so it resolves regardless of the working
+# directory Streamlit Cloud launches from; falls back to an emoji if missing.
+_ICON = Path(__file__).parent / "favicon.png"
+st.set_page_config(
+    page_title="SANPO",
+    page_icon=str(_ICON) if _ICON.exists() else "📡",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
 
 
