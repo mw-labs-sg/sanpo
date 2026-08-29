@@ -173,28 +173,32 @@ THEMES = {
         'zone_hi': '#4ade80', 'zone_amid': '#86efac', 'zone_bmid': '#fbbf24', 'zone_lo': '#f59e0b',
         'str_up': '#4ade80', 'str_dn': '#f59e0b', 'pull': '#fbbf24', 'bnce': '#93c5fd',
         'long': '#4ade80', 'short': '#f59e0b',
-        # Cool faded blue. `bg` is the flat fallback painted under the
-        # gradient (and mirrored in .streamlit/config.toml).
-        'bg': '#101a31',
+        # Cool faded blue, dark base with a pronounced glow. `bg` is the flat
+        # fallback painted under the gradient (mirrored in config.toml).
+        'bg': '#080e1a',
         # Panels and rows are SEMI-TRANSPARENT on purpose: opaque cards would
-        # cover the gradient and it would only show in the margins. These
-        # composite over the backdrop so the fade reads through the whole page.
-        'bg2': 'rgba(9,15,29,0.58)',      # recessed panels
-        'bg3': 'rgba(28,45,76,0.52)',     # raised rows, cards
-        'widget_bg': '#1b2c49',           # selects/buttons — kept opaque
+        # cover the gradient and it would only show in the page margins. Lower
+        # alpha here = more of the backdrop reads through the content.
+        'bg2': 'rgba(4,8,16,0.46)',       # recessed panels
+        'bg3': 'rgba(18,33,60,0.40)',     # raised rows, cards
+        'widget_bg': '#152339',           # selects/buttons — kept opaque
         # `border` must stay a 6-digit hex: several tabs append an alpha pair
         # to it (e.g. f"1px solid {bdr}22").
-        'border': '#28395a',
-        'text': '#e2e8f0', 'text2': '#9fb2ca', 'muted': '#6b7f9c',
+        'border': '#223353',
+        'text': '#e2e8f0', 'text2': '#9fb2ca', 'muted': '#8b9db8',
         'accent': '#4ade80',
+        # Three glow anchors sweeping top-left -> top-right -> bottom-centre
+        # over a dark diagonal base, so the fade has direction rather than
+        # sitting flat.
         'bg_gradient': (
-            'radial-gradient(1200px 720px at 18% -8%, rgba(59,130,246,0.20), transparent 62%),'
-            'radial-gradient(900px 620px at 92% 12%, rgba(56,189,248,0.12), transparent 58%),'
-            'linear-gradient(180deg, #0a0f1e 0%, #111c33 45%, #17263f 78%, #0e1626 100%)'
+            'radial-gradient(1300px 820px at 10% -12%, rgba(56,132,255,0.55), transparent 62%),'
+            'radial-gradient(1000px 700px at 90% 6%, rgba(34,190,255,0.34), transparent 58%),'
+            'radial-gradient(1150px 780px at 58% 108%, rgba(59,110,220,0.30), transparent 60%),'
+            'linear-gradient(160deg, #050912 0%, #070f1e 34%, #0a1628 62%, #04070e 100%)'
         ),
         # Transparent so Plotly panels sit on the gradient rather than punching
         # opaque rectangles through it.
-        'plot_bg': 'rgba(0,0,0,0)', 'grid': '#22304a', 'axis_line': '#2c3d5c', 'tick': '#9fb2ca',
+        'plot_bg': 'rgba(0,0,0,0)', 'grid': '#1e2c45', 'axis_line': '#283854', 'tick': '#9fb2ca',
     },
 }
 
@@ -259,4 +263,4 @@ def surface():
     return dict(bg=bg, bg2=bg2, bg3=bg3, card=bg3,
         border=bdr, text=txt, text2=txt2, muted=muted,
         off_dot='#3a4a63', off_name='#7d8fa8', link=txt,
-        bar_bg=bg3, row_alt='rgba(20,32,55,0.45)', hm_txt=txt)
+        bar_bg=bg3, row_alt='rgba(12,24,45,0.40)', hm_txt=txt)

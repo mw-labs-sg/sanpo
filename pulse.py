@@ -40,7 +40,7 @@ def _s():
             bg=bg, bg2=bg2, bg3=bg3, card=bg3,
             border=bdr, text=txt, text2=txt2, muted=muted,
             off_dot='#3a4a63', off_name='#7d8fa8', link=txt,
-            bar_bg=bg3, row_alt='rgba(20,32,55,0.45)', hm_txt=txt,
+            bar_bg=bg3, row_alt='rgba(12,24,45,0.40)', hm_txt=txt,
         )
 
 
