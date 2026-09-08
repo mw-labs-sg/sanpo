@@ -642,7 +642,7 @@ def _render_pulse_news(iframe_height=None):
     Height is derived from the content rather than the left column: the boxes
     are sized to show every row, so nothing needs scrolling to be read.
     """
-    from news import fetch_rss_feed
+    from news import fetch_rss_feed, backfill_missing_dates
     s = _s()
 
     box_h = _NEWS_HEAD_H + PULSE_NEWS_PER_SOURCE * _NEWS_ROW_H
@@ -673,6 +673,10 @@ def _render_pulse_news(iframe_height=None):
         items = fetch_rss_feed(name, url)
         items.sort(key=lambda x: x.get('sort_key', ''), reverse=True)
         items = items[:PULSE_NEWS_PER_SOURCE]
+        # Nikkei's feed carries no dates; scrape them off the article pages.
+        # Done after the slice so it costs 5 lookups, not 20.
+        items = backfill_missing_dates(items)
+        items.sort(key=lambda x: x.get('sort_key', ''), reverse=True)
         rendered += len(items)
 
         body = _rows(items) if items else (

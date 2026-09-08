@@ -3,6 +3,7 @@ import feedparser
 import logging
 import re
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from html import escape as html_escape, unescape as html_unescape
 from config import FONTS, THEMES, st_html
@@ -175,6 +176,61 @@ def fetch_rss_feed(name, url):
     except Exception as e:
         logger.warning(f"RSS error [{name}]: {e}")
         return []
+
+_JSONLD_DATE = re.compile(r'"datePublished"\s*:\s*"([^"]+)"')
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_article_dates(urls):
+    """Published dates for feeds that omit them, scraped from the article page.
+
+    Nikkei Asia's RSS is RDF carrying only <title> and <link> — no pubDate,
+    dc:date or any other date tag — so items from it have no date to show or
+    sort by. The article pages do expose JSON-LD "datePublished".
+
+    Returns {url: (date_str, iso_sort_key)}; missing/failed lookups are absent.
+    Fetched in parallel and cached, so this costs one round of requests per
+    refresh, not one per render.
+    """
+    def _one(url):
+        try:
+            raw = _fetch_with_ua(html_unescape(url), timeout=6)
+            if not raw:
+                return url, None
+            m = _JSONLD_DATE.search(raw.decode('utf-8', 'replace'))
+            if not m:
+                return url, None
+            dt = datetime.fromisoformat(m.group(1).replace('Z', '+00:00'))
+            return url, (dt.strftime('%d %b'), dt.isoformat())
+        except Exception:
+            return url, None
+
+    out = {}
+    try:
+        with ThreadPoolExecutor(max_workers=5) as ex:
+            for url, got in ex.map(_one, list(urls)):
+                if got:
+                    out[url] = got
+    except Exception as e:
+        logger.warning(f"article date backfill failed: {e}")
+    return out
+
+
+def backfill_missing_dates(items):
+    """Fill in dates for items whose feed supplied none. Returns new dicts."""
+    need = [it['url'] for it in items if not it.get('sort_key') and it.get('url')]
+    if not need:
+        return items
+    found = fetch_article_dates(tuple(need))
+    out = []
+    for it in items:
+        it = dict(it)
+        got = found.get(it.get('url'))
+        if got and not it.get('sort_key'):
+            it['date'], it['sort_key'] = html_escape(got[0]), got[1]
+        out.append(it)
+    return out
+
 
 def render_news_panel(region, feeds, max_items=20, height=600):
     """Render a ranked news panel — scores by source tier + recency."""
