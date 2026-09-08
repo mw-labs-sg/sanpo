@@ -3,7 +3,7 @@ import feedparser
 import logging
 import re
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from html import escape as html_escape, unescape as html_unescape
 from config import FONTS, THEMES, st_html
 
@@ -149,7 +149,18 @@ def fetch_rss_feed(name, url):
                 continue
             date_str = ''
             sort_key = ''
-            if pub:
+            # feedparser normalises RFC-2822 and ISO-8601 alike into
+            # *_parsed, so prefer it. Parsing `published` by hand with
+            # parsedate_to_datetime only understands RFC-2822, which left
+            # ISO-8601 feeds (Business Insider) showing a raw timestamp and,
+            # worse, an empty sort_key — so they never sorted or scored by age.
+            parsed = (getattr(entry, 'published_parsed', None)
+                      or getattr(entry, 'updated_parsed', None))
+            if parsed:
+                dt = datetime(*parsed[:6], tzinfo=timezone.utc)
+                date_str = dt.strftime('%d %b')
+                sort_key = dt.isoformat()
+            elif pub:
                 try:
                     from email.utils import parsedate_to_datetime
                     dt = parsedate_to_datetime(pub)

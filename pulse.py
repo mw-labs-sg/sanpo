@@ -612,13 +612,15 @@ def _render_movers(data):
 # One box per outlet — no commingling, so each masthead gets its own slot and
 # a busy wire can never crowd out a quiet one.
 PULSE_NEWS_SOURCES = [
-    ('BLOOMBERG',     'Bloomberg', 'https://feeds.bloomberg.com/markets/news.rss'),
-    ('FT',            'FT',        'https://www.ft.com/rss/home'),
-    ('CNA',           'CNA',       'https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml&category=6511'),
-    ('STRAITS TIMES', 'ST',        'https://www.straitstimes.com/news/business/rss.xml'),
-    ('THE EDGE',      'Edge',      'https://www.theedgesingapore.com/rss.xml'),
-    ('SCMP',          'SCMP',      'https://www.scmp.com/rss/5/feed'),
-    ('NIKKEI',        'Nikkei',    'https://asia.nikkei.com/rss/feed/nar'),
+    ('STRAITS TIMES',    'ST',        'https://www.straitstimes.com/news/business/rss.xml'),
+    ('CNA',              'CNA',       'https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml&category=6511'),
+    ('BLOOMBERG',        'Bloomberg', 'https://feeds.bloomberg.com/markets/news.rss'),
+    ('FT',               'FT',        'https://www.ft.com/rss/home'),
+    ('SCMP',             'SCMP',      'https://www.scmp.com/rss/5/feed'),
+    ('NIKKEI',           'Nikkei',    'https://asia.nikkei.com/rss/feed/nar'),
+    # www.businessinsider.com/rss, not markets.businessinsider.com/rss/news —
+    # the markets feed is mostly syndicated press releases.
+    ('BUSINESS INSIDER', 'BI',        'https://www.businessinsider.com/rss'),
 ]
 
 PULSE_NEWS_PER_SOURCE = 5
