@@ -609,59 +609,54 @@ def _render_movers(data):
 
 
 
-# Source-grouped boxes for the PULSE news panel.
-# (heading, show per-item source label, [(feed name, url), ...])
-# The label is redundant in a single-source box, so those trade it for headline
-# width; the Asia box mixes wires and keeps it.
-PULSE_NEWS_GROUPS = [
-    ('BLOOMBERG', False, [
-        ('Bloomberg', 'https://feeds.bloomberg.com/markets/news.rss'),
-    ]),
-    ('FT', False, [
-        ('FT', 'https://www.ft.com/rss/home'),
-    ]),
-    ('ASIA', True, [
-        ('CNA',     'https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml&category=6511'),
-        ('ST',      'https://www.straitstimes.com/news/business/rss.xml'),
-        ('Edge',    'https://www.theedgesingapore.com/rss.xml'),
-        ('SCMP',    'https://www.scmp.com/rss/5/feed'),
-        ('Nikkei',  'https://asia.nikkei.com/rss/feed/nar'),
-    ]),
+# One box per outlet — no commingling, so each masthead gets its own slot and
+# a busy wire can never crowd out a quiet one.
+PULSE_NEWS_SOURCES = [
+    ('BLOOMBERG',     'Bloomberg', 'https://feeds.bloomberg.com/markets/news.rss'),
+    ('FT',            'FT',        'https://www.ft.com/rss/home'),
+    ('CNA',           'CNA',       'https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml&category=6511'),
+    ('STRAITS TIMES', 'ST',        'https://www.straitstimes.com/news/business/rss.xml'),
+    ('THE EDGE',      'Edge',      'https://www.theedgesingapore.com/rss.xml'),
+    ('SCMP',          'SCMP',      'https://www.scmp.com/rss/5/feed'),
+    ('NIKKEI',        'Nikkei',    'https://asia.nikkei.com/rss/feed/nar'),
 ]
 
-# Per-FEED quota, so a fast-publishing wire cannot crowd the quieter ones out
-# of a shared box. Sized to the box height at render time, then clamped here.
-PULSE_NEWS_MIN_PER_FEED = 5
-PULSE_NEWS_MAX_PER_FEED = 10
+PULSE_NEWS_PER_SOURCE = 5
 _NEWS_ROW_H  = 26   # measured row height, px
 _NEWS_HEAD_H = 24   # box header
+_NEWS_GAP    = 6
 
 
-def _render_pulse_news(iframe_height=600):
-    """News panel — one box per source group, stacked to match left column height."""
+def pulse_news_height():
+    """Exact height for the stacked source boxes — every row visible, no scroll."""
+    n = len(PULSE_NEWS_SOURCES)
+    box = _NEWS_HEAD_H + PULSE_NEWS_PER_SOURCE * _NEWS_ROW_H
+    return n * box + _NEWS_GAP * (n - 1)
+
+
+def _render_pulse_news(iframe_height=None):
+    """News panel — one box per outlet, PULSE_NEWS_PER_SOURCE headlines each.
+
+    Height is derived from the content rather than the left column: the boxes
+    are sized to show every row, so nothing needs scrolling to be read.
+    """
     from news import fetch_rss_feed
-    t = get_theme(); s = _s()
-    pos_c = t['pos']
+    s = _s()
 
-    GAP = 6
-    n_groups = len(PULSE_NEWS_GROUPS)
-    inner_h = max(90, (iframe_height - GAP * (n_groups - 1)) // n_groups)
+    box_h = _NEWS_HEAD_H + PULSE_NEWS_PER_SOURCE * _NEWS_ROW_H
+    total_h = pulse_news_height()
 
-    def _rows(items, show_source):
+    def _rows(items):
         out = ''
         for i, item in enumerate(items):
             bg = s['bg2'] if i % 2 == 0 else s['row_alt']
-            label = (
-                "<span style='color:" + pos_c + ";font-weight:600;font-size:9px'>"
-                + item.get('source', '') + "</span>"
-            ) if show_source else ''
-            width = '92px' if show_source else '34px'
+            # No source label: the box header already names the outlet, so the
+            # space goes to the headline instead.
             out += (
                 "<div style='padding:4px 10px;background:" + bg + ";border-bottom:1px solid " + s['border'] + "18;"
                 "display:flex;align-items:baseline;gap:6px;font-family:" + FONTS + ";white-space:nowrap;overflow:hidden'>"
-                "<span style='flex-shrink:0;width:" + width + ";display:flex;gap:5px;align-items:baseline'>"
-                + label +
-                "<span style='color:" + s['muted'] + ";font-size:9px'>" + item.get('date', '') + "</span></span>"
+                "<span style='flex-shrink:0;width:34px;color:" + s['muted'] + ";font-size:9px'>"
+                + item.get('date', '') + "</span>"
                 "<a href='" + item.get('url', '#') + "' target='_blank' title='" + item.get('title', '') + "' "
                 "style='color:" + s['link'] + ";text-decoration:none;flex:1;min-width:0;"
                 "font-size:10.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"
@@ -670,42 +665,22 @@ def _render_pulse_news(iframe_height=600):
             )
         return out
 
-    # How many rows the box actually shows, and therefore how many to pull per
-    # feed. A single-feed box fills itself; a 5-feed box takes the floor of 5
-    # each so every outlet is guaranteed a slot.
-    visible_rows = max(1, (inner_h - _NEWS_HEAD_H) // _NEWS_ROW_H)
-
     boxes = ''
     rendered = 0
-    for heading, show_source, feeds in PULSE_NEWS_GROUPS:
-        per_feed = -(-visible_rows // len(feeds))          # ceil
-        per_feed = max(PULSE_NEWS_MIN_PER_FEED, min(PULSE_NEWS_MAX_PER_FEED, per_feed))
-
-        per_feed_items = []
-        for name, url in feeds:
-            got = fetch_rss_feed(name, url)
-            got.sort(key=lambda x: x.get('sort_key', ''), reverse=True)
-            per_feed_items.append(got[:per_feed])
-
-        if len(feeds) == 1:
-            items = per_feed_items[0]
-        else:
-            # Round-robin: newest from each outlet first, so the top of the box
-            # shows every source rather than whichever wire published last.
-            items = []
-            for rank in range(per_feed):
-                for feed_items in per_feed_items:
-                    if rank < len(feed_items):
-                        items.append(feed_items[rank])
+    for idx, (heading, name, url) in enumerate(PULSE_NEWS_SOURCES):
+        items = fetch_rss_feed(name, url)
+        items.sort(key=lambda x: x.get('sort_key', ''), reverse=True)
+        items = items[:PULSE_NEWS_PER_SOURCE]
         rendered += len(items)
 
-        body = _rows(items, show_source) if items else (
-            "<div style='padding:10px;color:" + s['muted'] + ";font-size:10px;text-align:center'>No items</div>"
+        body = _rows(items) if items else (
+            "<div style='padding:10px;color:" + s['muted'] + ";font-size:10px;text-align:center'>Unavailable</div>"
         )
+        mb = 0 if idx == len(PULSE_NEWS_SOURCES) - 1 else _NEWS_GAP
         boxes += (
             "<div style='background:" + s['bg2'] + ";border:1px solid " + s['border'] + ";border-radius:6px;"
-            "overflow:hidden;display:flex;flex-direction:column;height:" + str(inner_h) + "px;"
-            "margin-bottom:" + str(GAP) + "px'>"
+            "overflow:hidden;display:flex;flex-direction:column;height:" + str(box_h) + "px;"
+            "margin-bottom:" + str(mb) + "px'>"
             "<div style='padding:5px 10px;display:flex;justify-content:space-between;align-items:center;"
             "border-bottom:1px solid " + s['border'] + ";flex-shrink:0'>"
             "<span style='color:#f8fafc;font-size:9px;font-weight:600;letter-spacing:0.1em'>" + heading + "</span>"
@@ -716,7 +691,7 @@ def _render_pulse_news(iframe_height=600):
 
     if not rendered:
         return
-    _wrap("<div style='font-family:" + FONTS + "'>" + boxes + "</div>", iframe_height)
+    _wrap("<div style='font-family:" + FONTS + "'>" + boxes + "</div>", total_h)
 
 
 # ── BREAKOUT TABLES (week + month) ───────────────────────────────────────────
@@ -892,17 +867,16 @@ def render_pulse_tab(is_mobile):
     if is_mobile:
         _render_movers(data)
         _render_breakout_tables(breakout_data, pulse_data=data)
-        _render_pulse_news(iframe_height=560)   # 3 stacked boxes need more than the old single list
+        _render_pulse_news()
         _render_heatmap_grid(data)
     else:
         col_left, col_right = st.columns([55, 45])
 
         with col_left:
-            movers_height = _render_movers(data)
-            bo_height = _render_breakout_tables(breakout_data, pulse_data=data)
+            _render_movers(data)
+            _render_breakout_tables(breakout_data, pulse_data=data)
 
         with col_right:
-            news_height = movers_height + 8 + bo_height
-            _render_pulse_news(iframe_height=news_height)
+            _render_pulse_news()
 
         _render_heatmap_grid(data)
