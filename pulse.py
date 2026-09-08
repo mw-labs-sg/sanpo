@@ -629,7 +629,12 @@ PULSE_NEWS_GROUPS = [
     ]),
 ]
 
-PULSE_NEWS_PER_GROUP = 12   # headroom to scroll; ~6-8 visible per box
+# Per-FEED quota, so a fast-publishing wire cannot crowd the quieter ones out
+# of a shared box. Sized to the box height at render time, then clamped here.
+PULSE_NEWS_MIN_PER_FEED = 5
+PULSE_NEWS_MAX_PER_FEED = 10
+_NEWS_ROW_H  = 26   # measured row height, px
+_NEWS_HEAD_H = 24   # box header
 
 
 def _render_pulse_news(iframe_height=600):
@@ -665,14 +670,33 @@ def _render_pulse_news(iframe_height=600):
             )
         return out
 
+    # How many rows the box actually shows, and therefore how many to pull per
+    # feed. A single-feed box fills itself; a 5-feed box takes the floor of 5
+    # each so every outlet is guaranteed a slot.
+    visible_rows = max(1, (inner_h - _NEWS_HEAD_H) // _NEWS_ROW_H)
+
     boxes = ''
     rendered = 0
     for heading, show_source, feeds in PULSE_NEWS_GROUPS:
-        items = []
+        per_feed = -(-visible_rows // len(feeds))          # ceil
+        per_feed = max(PULSE_NEWS_MIN_PER_FEED, min(PULSE_NEWS_MAX_PER_FEED, per_feed))
+
+        per_feed_items = []
         for name, url in feeds:
-            items.extend(fetch_rss_feed(name, url))
-        items.sort(key=lambda x: x.get('sort_key', ''), reverse=True)
-        items = items[:PULSE_NEWS_PER_GROUP]
+            got = fetch_rss_feed(name, url)
+            got.sort(key=lambda x: x.get('sort_key', ''), reverse=True)
+            per_feed_items.append(got[:per_feed])
+
+        if len(feeds) == 1:
+            items = per_feed_items[0]
+        else:
+            # Round-robin: newest from each outlet first, so the top of the box
+            # shows every source rather than whichever wire published last.
+            items = []
+            for rank in range(per_feed):
+                for feed_items in per_feed_items:
+                    if rank < len(feed_items):
+                        items.append(feed_items[rank])
         rendered += len(items)
 
         body = _rows(items, show_source) if items else (
