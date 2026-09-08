@@ -609,56 +609,90 @@ def _render_movers(data):
 
 
 
+# Source-grouped boxes for the PULSE news panel.
+# (heading, show per-item source label, [(feed name, url), ...])
+# The label is redundant in a single-source box, so those trade it for headline
+# width; the Asia box mixes wires and keeps it.
+PULSE_NEWS_GROUPS = [
+    ('BLOOMBERG', False, [
+        ('Bloomberg', 'https://feeds.bloomberg.com/markets/news.rss'),
+    ]),
+    ('FT', False, [
+        ('FT', 'https://www.ft.com/rss/home'),
+    ]),
+    ('ASIA', True, [
+        ('CNA',     'https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml&category=6511'),
+        ('ST',      'https://www.straitstimes.com/news/business/rss.xml'),
+        ('Edge',    'https://www.theedgesingapore.com/rss.xml'),
+        ('SCMP',    'https://www.scmp.com/rss/5/feed'),
+        ('Nikkei',  'https://asia.nikkei.com/rss/feed/nar'),
+    ]),
+]
+
+PULSE_NEWS_PER_GROUP = 12   # headroom to scroll; ~6-8 visible per box
+
+
 def _render_pulse_news(iframe_height=600):
-    """News panel — stretches to match left column height."""
+    """News panel — one box per source group, stacked to match left column height."""
     from news import fetch_rss_feed
     t = get_theme(); s = _s()
     pos_c = t['pos']
 
-    feeds = [
-        ('CNA',           'https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml&category=6511'),
-        ('Straits Times', 'https://www.straitstimes.com/news/business/rss.xml'),
-        ('Bloomberg',     'https://feeds.bloomberg.com/markets/news.rss'),
-        ('FT',            'https://www.ft.com/rss/home'),
-    ]
+    GAP = 6
+    n_groups = len(PULSE_NEWS_GROUPS)
+    inner_h = max(90, (iframe_height - GAP * (n_groups - 1)) // n_groups)
 
-    all_items = []
-    for name, url in feeds:
-        all_items.extend(fetch_rss_feed(name, url))
+    def _rows(items, show_source):
+        out = ''
+        for i, item in enumerate(items):
+            bg = s['bg2'] if i % 2 == 0 else s['row_alt']
+            label = (
+                "<span style='color:" + pos_c + ";font-weight:600;font-size:9px'>"
+                + item.get('source', '') + "</span>"
+            ) if show_source else ''
+            width = '92px' if show_source else '34px'
+            out += (
+                "<div style='padding:4px 10px;background:" + bg + ";border-bottom:1px solid " + s['border'] + "18;"
+                "display:flex;align-items:baseline;gap:6px;font-family:" + FONTS + ";white-space:nowrap;overflow:hidden'>"
+                "<span style='flex-shrink:0;width:" + width + ";display:flex;gap:5px;align-items:baseline'>"
+                + label +
+                "<span style='color:" + s['muted'] + ";font-size:9px'>" + item.get('date', '') + "</span></span>"
+                "<a href='" + item.get('url', '#') + "' target='_blank' title='" + item.get('title', '') + "' "
+                "style='color:" + s['link'] + ";text-decoration:none;flex:1;min-width:0;"
+                "font-size:10.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"
+                + item.get('title', '') + "</a>"
+                "</div>"
+            )
+        return out
 
-    all_items.sort(key=lambda x: x.get('sort_key', ''), reverse=True)
-    all_items = all_items[:40]
-    if not all_items:
-        return
+    boxes = ''
+    rendered = 0
+    for heading, show_source, feeds in PULSE_NEWS_GROUPS:
+        items = []
+        for name, url in feeds:
+            items.extend(fetch_rss_feed(name, url))
+        items.sort(key=lambda x: x.get('sort_key', ''), reverse=True)
+        items = items[:PULSE_NEWS_PER_GROUP]
+        rendered += len(items)
 
-    rows = ''
-    for i, item in enumerate(all_items):
-        bg = s['bg2'] if i % 2 == 0 else s['row_alt']
-        src_col = item.get('source', '')
-        dt_col  = item.get('date', '')
-        rows += (
-            "<div style='padding:4px 10px;background:" + bg + ";border-bottom:1px solid " + s['border'] + "18;"
-            "display:flex;align-items:baseline;gap:6px;font-family:" + FONTS + ";white-space:nowrap;overflow:hidden'>"
-            "<span style='flex-shrink:0;width:115px;display:flex;gap:5px;align-items:baseline'>"
-            "<span style='color:" + pos_c + ";font-weight:600;font-size:9px'>" + src_col + "</span>"
-            "<span style='color:" + s['muted'] + ";font-size:9px'>" + dt_col + "</span></span>"
-            "<a href='" + item.get('url', '#') + "' target='_blank' style='color:" + s['link'] + ";text-decoration:none;"
-            "font-size:10.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis'>" + item.get('title', '') + "</a>"
+        body = _rows(items, show_source) if items else (
+            "<div style='padding:10px;color:" + s['muted'] + ";font-size:10px;text-align:center'>No items</div>"
+        )
+        boxes += (
+            "<div style='background:" + s['bg2'] + ";border:1px solid " + s['border'] + ";border-radius:6px;"
+            "overflow:hidden;display:flex;flex-direction:column;height:" + str(inner_h) + "px;"
+            "margin-bottom:" + str(GAP) + "px'>"
+            "<div style='padding:5px 10px;display:flex;justify-content:space-between;align-items:center;"
+            "border-bottom:1px solid " + s['border'] + ";flex-shrink:0'>"
+            "<span style='color:#f8fafc;font-size:9px;font-weight:600;letter-spacing:0.1em'>" + heading + "</span>"
+            "<span style='color:" + s['muted'] + ";font-size:9px;font-weight:500'>" + str(len(items)) + "</span></div>"
+            "<div style='overflow-y:auto;flex:1;min-height:0'>" + body + "</div>"
             "</div>"
         )
 
-    html = (
-        "<div style='background:" + s['bg2'] + ";border:1px solid " + s['border'] + ";border-radius:6px;"
-        "overflow:hidden;font-family:" + FONTS + ";height:" + str(iframe_height) + "px;"
-        "display:flex;flex-direction:column'>"
-        "<div style='padding:6px 10px;display:flex;justify-content:space-between;align-items:center;"
-        "border-bottom:1px solid " + s['border'] + ";flex-shrink:0'>"
-        "<span style='color:#f8fafc;font-size:9px;font-weight:600;letter-spacing:0.1em'>LATEST</span>"
-        "<span style='color:" + s['muted'] + ";font-size:9px;font-weight:500'>" + str(len(all_items)) + "</span></div>"
-        "<div style='overflow-y:auto;flex:1'>" + rows + "</div>"
-        "</div>"
-    )
-    _wrap(html, iframe_height)
+    if not rendered:
+        return
+    _wrap("<div style='font-family:" + FONTS + "'>" + boxes + "</div>", iframe_height)
 
 
 # ── BREAKOUT TABLES (week + month) ───────────────────────────────────────────
@@ -834,7 +868,7 @@ def render_pulse_tab(is_mobile):
     if is_mobile:
         _render_movers(data)
         _render_breakout_tables(breakout_data, pulse_data=data)
-        _render_pulse_news(iframe_height=400)
+        _render_pulse_news(iframe_height=560)   # 3 stacked boxes need more than the old single list
         _render_heatmap_grid(data)
     else:
         col_left, col_right = st.columns([55, 45])
