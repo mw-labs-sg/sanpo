@@ -92,7 +92,8 @@ HEATMAP_SECTORS = OrderedDict([
     ('Singapore',  ['^STI', 'ES3.SI', 'S68.SI', 'MBH.SI']),
 ])
 
-SPARKLINE_SYMBOLS = ['ES=F', 'BTC-USD', 'GC=F', 'CL=F', 'USDSGD=X', '^STI']
+# Same set as the hero cards: the sparkline lives inside the card now.
+SPARKLINE_SYMBOLS = list(HERO_SYMBOLS)
 
 
 # ── FETCH ────────────────────────────────────────────────────────────────────
@@ -287,7 +288,7 @@ def _compute_breakout_status(hist, period_type):
 
 # ── SVG SPARKLINE ────────────────────────────────────────────────────────────
 
-def _svg_sparkline(data, width=100, height=28, pos_color='#4ade80', neg_color='#f59e0b'):
+def _svg_sparkline(data, width=100, height=28, pos_color='#4ade80', neg_color='#f59e0b', css_width=None):
     if not data or len(data) < 2:
         return ''
     vals = np.array(data)
@@ -301,7 +302,8 @@ def _svg_sparkline(data, width=100, height=28, pos_color='#4ade80', neg_color='#
     fill_points = f'0,{height} {points} {width},{height}'
     uid = f'sp{abs(hash(tuple(data))) % 99999}'
     return (
-        f"<svg width='{width}' height='{height}' viewBox='0 0 {width} {height}'>"
+        f"<svg width='{css_width or width}' height='{height}' viewBox='0 0 {width} {height}' "
+        f"preserveAspectRatio='none' style='display:block'>"
         f"<defs><linearGradient id='{uid}' x1='0' y1='0' x2='0' y2='1'>"
         f"<stop offset='0%' stop-color='{color}' stop-opacity='0.3'/>"
         f"<stop offset='100%' stop-color='{color}' stop-opacity='0'/>"
@@ -413,11 +415,18 @@ def _render_market_status_bar():
     _wrap(html, 28)
 
 
-def _render_hero_row(data):
+def _render_hero_row(data, spark_data=None):
+    """Headline market cards: price, today's move, and a 30-session line.
+
+    The sparkline used to be a second row repeating six of these same symbols
+    with the same day %, so the two are one card now — same information, one
+    row, no duplicated numbers.
+    """
     t = get_theme()
     s = _s()
     pos_c, neg_c = t['pos'], t['neg']
     is_light = get_theme().get('mode') == 'light'
+    spark_data = spark_data or {}
 
     cards = ''
     for sym, cfg in HERO_SYMBOLS.items():
@@ -437,64 +446,43 @@ def _render_hero_row(data):
             card_bg = f'background:linear-gradient(135deg,{s["bg3"]},{s["bg2"]});'
             glow = f'text-shadow:0 0 20px {color}40;'
 
-        # Force high contrast price color
         price_c = '#0f172a' if is_light else '#f8fafc'
         label_c = '#475569' if is_light else '#f8fafc'
 
+        spark = _svg_sparkline(spark_data.get(sym), width=120, height=22,
+                               pos_color=pos_c, neg_color=neg_c, css_width='100%')
+        spark_block = f"<div style='margin-top:5px;height:22px'>{spark}</div>"
+
         cards += (
-            f"<div style='flex:1;min-width:110px;padding:10px 12px;"
+            f"<div style='flex:1;min-width:118px;padding:9px 11px 8px 11px;"
             f"{card_bg}"
             f"border:1px solid {s['border']};border-radius:6px;position:relative;overflow:hidden'>"
             f"<div style='position:absolute;top:0;left:0;right:0;height:2px;"
             f"background:linear-gradient(90deg,transparent,{color}40,transparent)'></div>"
             f"<div style='color:{label_c};font-size:8px;font-weight:600;letter-spacing:0.12em;"
-            f"text-transform:uppercase;margin-bottom:4px'>{cfg['label']}</div>"
+            f"text-transform:uppercase;margin-bottom:3px'>{cfg['label']}</div>"
             f"<div style='color:{price_c};font-size:17px;font-weight:700;"
             f"font-variant-numeric:tabular-nums;letter-spacing:-0.02em;"
             f"{glow}'>{price_str}</div>"
-            f"<div style='margin-top:3px;display:flex;align-items:center;gap:4px'>"
+            f"<div style='margin-top:2px;display:flex;align-items:center;gap:4px'>"
             f"<span style='color:{color};font-size:10px'>{arrow}</span>"
             f"<span style='color:{color};font-size:11px;font-weight:700'>{sign}{change:.2f}%</span>"
-            f"</div></div>"
-        )
-    html = f"<div style='display:flex;gap:6px;flex-wrap:wrap'>{cards}</div>"
-    _wrap(html, 80)
-
-
-def _render_sparkline_row(spark_data, pulse_data):
-    t = get_theme(); s = _s()
-    pos_c, neg_c = t['pos'], t['neg']
-    cards = ''
-    for sym in SPARKLINE_SYMBOLS:
-        sdata = spark_data.get(sym)
-        pdata = pulse_data.get(sym)
-        if not sdata or not pdata:
-            continue
-        short = clean_symbol(sym)
-        change = pdata['change']
-        color = pos_c if change >= 0 else neg_c
-        sign = '+' if change >= 0 else ''
-        svg = _svg_sparkline(sdata, width=80, height=22, pos_color=pos_c, neg_color=neg_c)
-        cards += (
-            f"<div style='flex:1;min-width:120px;padding:5px 8px;background:{s['card']};"
-            f"border:1px solid {s['border']};border-radius:4px'>"
-            f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:2px'>"
-            f"<span style='color:{s['text2']};font-size:8px;font-weight:600;letter-spacing:0.06em'>{short}</span>"
-            f"<span style='color:{color};font-size:8px;font-weight:700'>{sign}{change:.2f}%</span>"
             f"</div>"
-            f"{svg}"
+            f"{spark_block}"
             f"</div>"
         )
-    html = (
-        f"<div style='display:flex;align-items:center;gap:8px;margin-bottom:4px'>"
+
+    header = (
+        f"<div style='display:flex;align-items:center;gap:8px;margin-bottom:5px'>"
         f"<span style='color:#f8fafc;font-size:9px;font-weight:600;letter-spacing:0.1em;"
-        f"text-transform:uppercase;font-family:{FONTS}'>30-Day Trend</span>"
+        f"text-transform:uppercase;font-family:{FONTS}'>Markets</span>"
         f"<span style='color:{s['muted']};font-size:8px;font-weight:500;font-family:{FONTS}'>"
-        f"line = last 30 sessions &middot; % = today</span>"
+        f"price &amp; today &middot; line = last 30 sessions</span>"
         f"<div style='flex:1;height:1px;background:{s['border']}'></div></div>"
-        f"<div style='display:flex;gap:5px;flex-wrap:wrap'>{cards}</div>"
     )
-    _wrap(html, 72)
+    html = f"{header}<div style='display:flex;gap:6px;flex-wrap:wrap'>{cards}</div>"
+    _wrap(html, 126)
+
 
 def _render_heatmap_grid(data):
     t = get_theme()
@@ -889,9 +877,7 @@ def render_pulse_tab(is_mobile):
         return
 
     _render_market_status_bar()
-    _render_hero_row(data)
-    if spark_data:
-        _render_sparkline_row(spark_data, data)
+    _render_hero_row(data, spark_data)
 
     # News first and full width, then the market panels — the news grid is the
     # thing being scanned, so it leads rather than sitting in a side column.
