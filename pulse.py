@@ -485,8 +485,16 @@ def _render_sparkline_row(spark_data, pulse_data):
             f"{svg}"
             f"</div>"
         )
-    html = f"<div style='display:flex;gap:5px;flex-wrap:wrap'>{cards}</div>"
-    _wrap(html, 50)
+    html = (
+        f"<div style='display:flex;align-items:center;gap:8px;margin-bottom:4px'>"
+        f"<span style='color:#f8fafc;font-size:9px;font-weight:600;letter-spacing:0.1em;"
+        f"text-transform:uppercase;font-family:{FONTS}'>30-Day Trend</span>"
+        f"<span style='color:{s['muted']};font-size:8px;font-weight:500;font-family:{FONTS}'>"
+        f"line = last 30 sessions &middot; % = today</span>"
+        f"<div style='flex:1;height:1px;background:{s['border']}'></div></div>"
+        f"<div style='display:flex;gap:5px;flex-wrap:wrap'>{cards}</div>"
+    )
+    _wrap(html, 72)
 
 def _render_heatmap_grid(data):
     t = get_theme()
@@ -624,29 +632,32 @@ PULSE_NEWS_SOURCES = [
 ]
 
 PULSE_NEWS_PER_SOURCE = 5
+PULSE_NEWS_COLS = 3          # boxes per row on desktop; 7 sources -> 3 + 3 + 1
 _NEWS_ROW_H  = 26   # measured row height, px
 _NEWS_HEAD_H = 24   # box header
 _NEWS_GAP    = 6
 
 
-def pulse_news_height():
-    """Exact height for the stacked source boxes — every row visible, no scroll."""
+def pulse_news_height(cols=PULSE_NEWS_COLS):
+    """Exact height for the source-box grid — every row visible, no scroll."""
     n = len(PULSE_NEWS_SOURCES)
     box = _NEWS_HEAD_H + PULSE_NEWS_PER_SOURCE * _NEWS_ROW_H
-    return n * box + _NEWS_GAP * (n - 1)
+    grid_rows = -(-n // max(1, cols))
+    return grid_rows * box + _NEWS_GAP * (grid_rows - 1)
 
 
-def _render_pulse_news(iframe_height=None):
-    """News panel — one box per outlet, PULSE_NEWS_PER_SOURCE headlines each.
+def _render_pulse_news(cols=PULSE_NEWS_COLS):
+    """News panel — one box per outlet, PULSE_NEWS_PER_SOURCE headlines each,
+    laid out side by side so the whole wire is visible at a glance.
 
-    Height is derived from the content rather than the left column: the boxes
-    are sized to show every row, so nothing needs scrolling to be read.
+    Height is derived from the content: boxes are sized to show every row, so
+    nothing needs scrolling to be read.
     """
     from news import fetch_rss_feed, backfill_missing_dates
     s = _s()
 
     box_h = _NEWS_HEAD_H + PULSE_NEWS_PER_SOURCE * _NEWS_ROW_H
-    total_h = pulse_news_height()
+    total_h = pulse_news_height(cols)
 
     def _rows(items):
         out = ''
@@ -669,7 +680,7 @@ def _render_pulse_news(iframe_height=None):
 
     boxes = ''
     rendered = 0
-    for idx, (heading, name, url) in enumerate(PULSE_NEWS_SOURCES):
+    for heading, name, url in PULSE_NEWS_SOURCES:
         items = fetch_rss_feed(name, url)
         items.sort(key=lambda x: x.get('sort_key', ''), reverse=True)
         items = items[:PULSE_NEWS_PER_SOURCE]
@@ -682,11 +693,9 @@ def _render_pulse_news(iframe_height=None):
         body = _rows(items) if items else (
             "<div style='padding:10px;color:" + s['muted'] + ";font-size:10px;text-align:center'>Unavailable</div>"
         )
-        mb = 0 if idx == len(PULSE_NEWS_SOURCES) - 1 else _NEWS_GAP
         boxes += (
             "<div style='background:" + s['bg2'] + ";border:1px solid " + s['border'] + ";border-radius:6px;"
-            "overflow:hidden;display:flex;flex-direction:column;height:" + str(box_h) + "px;"
-            "margin-bottom:" + str(mb) + "px'>"
+            "overflow:hidden;display:flex;flex-direction:column;height:" + str(box_h) + "px'>"
             "<div style='padding:5px 10px;display:flex;justify-content:space-between;align-items:center;"
             "border-bottom:1px solid " + s['border'] + ";flex-shrink:0'>"
             "<span style='color:#f8fafc;font-size:9px;font-weight:600;letter-spacing:0.1em'>" + heading + "</span>"
@@ -697,7 +706,11 @@ def _render_pulse_news(iframe_height=None):
 
     if not rendered:
         return
-    _wrap("<div style='font-family:" + FONTS + "'>" + boxes + "</div>", total_h)
+    _wrap(
+        "<div style='display:grid;grid-template-columns:repeat(" + str(cols) + ",minmax(0,1fr));"
+        "gap:" + str(_NEWS_GAP) + "px;font-family:" + FONTS + "'>" + boxes + "</div>",
+        total_h,
+    )
 
 
 # ── BREAKOUT TABLES (week + month) ───────────────────────────────────────────
@@ -705,7 +718,7 @@ def _render_pulse_news(iframe_height=None):
 TOP_N_BREAKOUTS = 5   # max rows per side (above/below) per period
 
 
-def _render_breakout_tables(breakout_data, pulse_data=None):
+def _render_breakout_tables(breakout_data, pulse_data=None, is_mobile=False):
     """
     Two compact tables stacked:
       Table 1 — WEEK BREAKOUTS  : ▲ above prev week high | ▼ below prev week low
@@ -812,7 +825,9 @@ def _render_breakout_tables(breakout_data, pulse_data=None):
             "<div style='color:" + muted + ";font-size:8px;font-weight:600;letter-spacing:0.12em;"
             "text-transform:uppercase;padding:7px 10px 5px 10px;"
             "border-bottom:1px solid " + bdr + "'>"
-            "PREV " + period_label + " BREAKOUTS</div>"
+            + period_label + " BREAKOUTS"
+            "<span style='font-weight:500;letter-spacing:0.04em;text-transform:none'>"
+            "&nbsp;&middot; price outside prev " + period_label.lower() + " high/low</span></div>"
             # Scrollable body
             "<div style='overflow-y:auto;max-height:" + str(TABLE_H) + "px;padding:4px 10px 6px 10px'>"
             "<div style='display:grid;grid-template-columns:1fr 1fr;gap:16px'>"
@@ -843,9 +858,17 @@ def _render_breakout_tables(breakout_data, pulse_data=None):
     month_html, month_h = _table(m_above, m_below, 'MONTH')
     year_html,  year_h  = _table(y_above, y_below,  'YEAR')
 
-    total_height = week_h + month_h + year_h + 16
+    # Side by side on desktop so all three periods are visible at once; stacked
+    # on mobile, where three columns would crush each table's inner
+    # ABOVE HIGH | BELOW LOW split to ~110px.
+    bt_cols = 1 if is_mobile else 3
+    if bt_cols == 1:
+        total_height = week_h + month_h + year_h + 16
+    else:
+        total_height = max(week_h, month_h, year_h) + 8
     combined = (
-        "<div style='display:flex;flex-direction:column;gap:8px;font-family:" + FONTS + "'>"
+        "<div style='display:grid;grid-template-columns:repeat(" + str(bt_cols) + ",minmax(0,1fr));"
+        "gap:8px;align-items:start;font-family:" + FONTS + "'>"
         + week_html + month_html + year_html +
         "</div>"
     )
@@ -870,19 +893,9 @@ def render_pulse_tab(is_mobile):
     if spark_data:
         _render_sparkline_row(spark_data, data)
 
-    if is_mobile:
-        _render_movers(data)
-        _render_breakout_tables(breakout_data, pulse_data=data)
-        _render_pulse_news()
-        _render_heatmap_grid(data)
-    else:
-        col_left, col_right = st.columns([55, 45])
-
-        with col_left:
-            _render_movers(data)
-            _render_breakout_tables(breakout_data, pulse_data=data)
-
-        with col_right:
-            _render_pulse_news()
-
-        _render_heatmap_grid(data)
+    # News first and full width, then the market panels — the news grid is the
+    # thing being scanned, so it leads rather than sitting in a side column.
+    _render_pulse_news(cols=1 if is_mobile else PULSE_NEWS_COLS)
+    _render_movers(data)
+    _render_breakout_tables(breakout_data, pulse_data=data, is_mobile=is_mobile)
+    _render_heatmap_grid(data)
