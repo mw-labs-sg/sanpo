@@ -93,6 +93,7 @@ def _inject_theme_css():
            backdrop on scroll), so pin the gradient to the page instead. */
         .stApp {{ background-attachment: scroll; }}
     }}
+    a.sanpo-sibling:hover {{ color: {accent} !important; border-color: {accent} !important; }}
     #MainMenu {{visibility: hidden;}}
     footer {{visibility: hidden;}}
     [data-testid="stStatusWidget"] {{visibility: hidden;}}
@@ -141,6 +142,8 @@ def main():
     pos_c = t['pos']
     neg_c = t['neg']
     title_c = '#f8fafc'
+    t2 = t.get('text2', '#9fb2ca')      # sibling-app link
+    bd = t.get('border', '#28395a')
 
     st.markdown(f"""
         <style>
@@ -174,6 +177,13 @@ def main():
                 </linearGradient></defs>
             </svg>
             <span style='font-family:Orbitron,sans-serif;font-size:24px;font-weight:700;letter-spacing:0.08em;color:{title_c};line-height:1'>SANPO</span>
+            <a href='https://sakata.streamlit.app/' target='_blank' rel='noopener' class='sanpo-sibling'
+               style='margin-left:auto;display:inline-flex;align-items:center;gap:5px;
+                      font-family:Inter,sans-serif;font-size:10px;font-weight:600;
+                      letter-spacing:0.12em;text-transform:uppercase;text-decoration:none;
+                      color:{t2};border:1px solid {bd};border-radius:4px;padding:5px 10px'>
+                SAKATA <span style='font-size:11px;line-height:1'>&#8599;</span>
+            </a>
         </div>
     """, unsafe_allow_html=True)
 
