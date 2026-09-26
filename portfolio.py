@@ -23,6 +23,9 @@ C_POS = '#60a5fa'; C_NEG = '#fb7185'; C_TXT = '#e2e8f0'; C_TXT2 = '#9fb2ca'
 C_MUTE = '#9fb2ca'; C_BG = 'rgba(4,8,16,0.46)'; C_HDR = 'rgba(18,33,60,0.40)'
 C_BORDER = '#1e2e4c'
 C_GOLD = '#fbbf24'; C_EW = '#9fb2ca'
+# Benchmarks are drawn in order from this ramp; MAX_BENCHMARKS caps the list.
+BENCH_COLORS = ['#c084fc', '#f472b6', '#38bdf8', '#fb923c']  # kept clear of the strategy green
+C_BENCH = BENCH_COLORS[0]; MAX_BENCHMARKS = len(BENCH_COLORS)
 TH = "padding:4px 8px;border-bottom:1px solid #1e2e4c;color:#f8fafc;font-weight:600;font-size:9px;text-transform:uppercase;letter-spacing:0.06em;"
 TD = "padding:5px 8px;border-bottom:1px solid #1e2e4c22;"
 
@@ -92,6 +95,64 @@ def fetch_symbol_history(symbols_tuple, days=1800):
     data = data[valid].ffill().dropna()
     if len(data) < 50: return None, valid
     return data, valid
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_benchmark_history(symbol, days=1800):
+    """Close series for a single benchmark ticker. Separate from
+    fetch_symbol_history, which needs >= 2 symbols to build a portfolio."""
+    if not symbol: return None
+    start = (datetime.now() - pd.Timedelta(days=days)).strftime('%Y-%m-%d')
+    try:
+        hist = yf.Ticker(symbol).history(start=start)
+    except Exception as e:
+        logger.warning(f"[{symbol}] benchmark fetch error: {e}")
+        return None
+    if hist.empty or len(hist) < 50: return None
+    closes = hist['Close'].copy()
+    closes.index = closes.index.tz_localize(None) if closes.index.tz else closes.index
+    closes.index = closes.index.normalize()
+    return closes.groupby(closes.index).last()
+
+
+def benchmark_series(symbols, fetch_days, price_index):
+    """Daily returns for each benchmark ticker, aligned to the portfolio's *price*
+    dates so they land on the same index as data.pct_change(). Returns
+    ([(symbol, returns), ...], [symbols with no usable history])."""
+    out = []; failed = []
+    for sym in _bench_list(symbols):
+        prices = fetch_benchmark_history(sym, days=fetch_days)
+        ret = None
+        if prices is not None:
+            px = prices.reindex(prices.index.union(price_index)).ffill().reindex(price_index).dropna()
+            ret = px.pct_change().dropna()
+        if ret is None or len(ret) < 20: failed.append(sym)
+        else: out.append((sym, ret))
+    return out, failed
+
+
+def _bench_list(symbols):
+    """Accept 'SPY, XLV' or ['SPY', 'XLV'] -> ['SPY', 'XLV'], deduped and capped."""
+    if not symbols: return []
+    if isinstance(symbols, str):
+        symbols = symbols.replace(';', ',').split(',')
+    out = []
+    for sym in symbols:
+        sym = (sym or '').strip().upper()
+        if sym and sym not in out: out.append(sym)
+    return out[:MAX_BENCHMARKS]
+
+
+def _bench_metrics(series, start=None):
+    """[(symbol, returns)] -> [(symbol, returns, metrics)] over the window from
+    `start`, dropping any benchmark too short to measure there."""
+    out = []
+    for sym, ret in series or []:
+        r = ret.loc[ret.index >= start] if start is not None else ret
+        if len(r) < 5: continue
+        m = _calc_oos_metrics(r)
+        if m: out.append((sym, r, m))
+    return out
+
 
 # =============================================================================
 # MC OPTIMIZATION ENGINE
@@ -199,8 +260,30 @@ def _optimize_window_vectorized(returns_array, n_portfolios, n_assets, max_weigh
 # WALK-FORWARD ENGINE
 # =============================================================================
 
+def _apply_min_pos(w, min_pos, max_weight=None):
+    """Drop positions smaller than min_pos and rescale the survivors back to 100%.
+    Unlike min_weight (a floor that forces every asset in), this removes dust:
+    a 0.4% sliver becomes 0 and its weight goes to the positions worth trading."""
+    if not min_pos or min_pos <= 0: return w
+    keep = np.abs(w) >= min_pos
+    if not keep.any(): return w  # everything is dust — leave the optimizer's answer alone
+    out = np.where(keep, w, 0.0)
+    total = out.sum()
+    if total <= 0: return w
+    out = out / total
+    # Rescaling can lift a survivor past the max weight; clip it back a few times.
+    if max_weight:
+        for _ in range(5):
+            if not np.any(np.abs(out) > max_weight): break
+            out = np.clip(out, -max_weight, max_weight)
+            total = out.sum()
+            if total <= 0: return w
+            out = out / total
+    return out
+
+
 def _optimize_at_rebalance(returns_df, approach, score_type, n_portfolios, mw, mnw=0.0, allow_short=False,
-                           max_vol=None, min_ann_ret=None, window_cache=None):
+                           max_vol=None, min_ann_ret=None, window_cache=None, min_pos=0.0):
     n_assets = returns_df.shape[1]; data_len = len(returns_df)
     window_weights_list = []; blend_wts = []
     for wname, wdays in approach['windows'].items():
@@ -220,13 +303,13 @@ def _optimize_at_rebalance(returns_df, approach, score_type, n_portfolios, mw, m
     all_w = np.array(window_weights_list)
     opt_w = np.average(all_w, axis=0, weights=blend_wts)
     opt_w /= opt_w.sum()
-    return opt_w
+    return _apply_min_pos(opt_w, min_pos, mw)
 
 
 def _walk_forward_single(returns_df, approach, score_type, rebal_months,
                          n_portfolios=10000, max_weight=0.50, min_weight=0.0,
                          txn_cost=0.001, allow_short=False,
-                         max_vol=None, min_ann_ret=None, window_cache=None):
+                         max_vol=None, min_ann_ret=None, window_cache=None, min_pos=0.0):
     n_assets = returns_df.shape[1]; mw = max_weight; mnw = min_weight
     min_is_days = max(approach['windows'].values()); dates = returns_df.index
 
@@ -263,7 +346,8 @@ def _walk_forward_single(returns_df, approach, score_type, rebal_months,
     for i, (ri, rd) in enumerate(rebal_dates):
         is_data = returns_df.iloc[:ri + 1]
         opt_w = _optimize_at_rebalance(is_data, approach, score_type, n_portfolios, mw, mnw, allow_short,
-                                        max_vol=max_vol, min_ann_ret=min_ann_ret, window_cache=window_cache)
+                                        max_vol=max_vol, min_ann_ret=min_ann_ret, window_cache=window_cache,
+                                        min_pos=min_pos)
         if opt_w is None: continue
         oos_start = ri + 1
         oos_end = rebal_dates[i + 1][0] if i + 1 < len(rebal_dates) else len(dates)
@@ -280,7 +364,8 @@ def _walk_forward_single(returns_df, approach, score_type, rebal_months,
 
     if not oos_segments or len(weight_history) < 2: return None
     current_w = _optimize_at_rebalance(returns_df, approach, score_type, n_portfolios, mw, mnw, allow_short,
-                                        max_vol=max_vol, min_ann_ret=min_ann_ret, window_cache=window_cache)
+                                        max_vol=max_vol, min_ann_ret=min_ann_ret, window_cache=window_cache,
+                                        min_pos=min_pos)
     if current_w is None: current_w = weight_history[-1]['weights']
     full_oos = pd.concat(oos_segments)
     return {'oos_returns': full_oos, 'weight_history': weight_history,
@@ -327,7 +412,7 @@ def _calc_oos_metrics(returns_series):
 def run_walkforward_grid(symbols, score_type='Win Rate', rebal_months=3, n_portfolios=10000,
                          fetch_days=1800, max_weight=0.50, min_weight=0.0,
                          txn_cost=0.001, allow_short=False, progress_bar=None,
-                         max_vol=None, min_ann_ret=None):
+                         max_vol=None, min_ann_ret=None, benchmarks=None, min_pos=0.0):
     data, valid = fetch_symbol_history(tuple(symbols), days=fetch_days)
     if data is None or len(valid) < 2: return None
     returns = data.pct_change().dropna(); n_assets = len(valid)
@@ -361,6 +446,7 @@ def run_walkforward_grid(symbols, score_type='Win Rate', rebal_months=3, n_portf
             turnover = np.sum(np.abs(eq_w - curr_w)) / 2.0
             eq_daily[t] -= turnover * txn_cost; curr_w = eq_w.copy()
     eq_ret = pd.Series(eq_daily, index=returns.index)
+    bench, bench_failed = benchmark_series(benchmarks, fetch_days, data.index)
 
     results = OrderedDict()
     window_cache = {}  # shared cache: (window_name, data_len) -> best_weights
@@ -371,7 +457,7 @@ def run_walkforward_grid(symbols, score_type='Win Rate', rebal_months=3, n_portf
             wf = _walk_forward_single(returns, approach, score_type, rebal_months,
                                       n_portfolios, max_weight, min_weight, txn_cost, allow_short,
                                       max_vol=max_vol, min_ann_ret=min_ann_ret,
-                                      window_cache=window_cache)
+                                      window_cache=window_cache, min_pos=min_pos)
             if wf is not None:
                 metrics = _calc_oos_metrics(wf['oos_returns'])
                 if metrics is not None:
@@ -389,8 +475,10 @@ def run_walkforward_grid(symbols, score_type='Win Rate', rebal_months=3, n_portf
         r['eq_returns'] = eq_aligned
         r['eq_metrics'] = _calc_oos_metrics(eq_aligned)
         r['eq_n_rebals'] = sum(1 for d in eq_rebal_set if d >= oos_start)
+        r['bench'] = _bench_metrics(bench, oos_start)
     return {'results': results, 'symbols': valid, 'returns': returns,
             'eq_returns': eq_ret, 'eq_rebal_set': eq_rebal_set,
+            'bench_symbols': [b[0] for b in bench], 'bench_failed': bench_failed,
             'score_type': score_type, 'rebal_months': rebal_months, 'txn_cost': txn_cost}
 
 # =============================================================================
@@ -400,7 +488,7 @@ def run_walkforward_grid(symbols, score_type='Win Rate', rebal_months=3, n_portf
 def run_fullsample(symbols, score_type='Win Rate', n_portfolios=10000,
                    fetch_days=1800, max_weight=0.50, min_weight=0.0,
                    txn_cost=0.001, allow_short=False, progress_bar=None,
-                   max_vol=None, min_ann_ret=None, rebal_months=3):
+                   max_vol=None, min_ann_ret=None, rebal_months=3, benchmarks=None, min_pos=0.0):
     """Run MC optimization on full dataset — no walk-forward split.
     Tests all PORTFOLIO_APPROACHES lookback windows that fit in the data,
     returns weights + in-sample backtest for each."""
@@ -441,6 +529,8 @@ def run_fullsample(symbols, score_type='Win Rate', n_portfolios=10000,
             eq_daily[t] -= turnover * txn_cost; curr_w = eq_w.copy()
     eq_ret = pd.Series(eq_daily, index=returns.index)
     eq_metrics = _calc_oos_metrics(eq_ret)
+    bench, bench_failed = benchmark_series(benchmarks, fetch_days, data.index)
+    bench_full = _bench_metrics(bench)
 
     results = OrderedDict()
     window_cache = {}
@@ -458,7 +548,7 @@ def run_fullsample(symbols, score_type='Win Rate', n_portfolios=10000,
             opt_w = _optimize_at_rebalance(returns, approach, score_type, n_portfolios,
                                            max_weight, min_weight, allow_short,
                                            max_vol=max_vol, min_ann_ret=min_ann_ret,
-                                           window_cache=window_cache)
+                                           window_cache=window_cache, min_pos=min_pos)
             if opt_w is None:
                 continue
 
@@ -491,6 +581,7 @@ def run_fullsample(symbols, score_type='Win Rate', n_portfolios=10000,
                 'eq_returns': eq_ret,
                 'eq_metrics': eq_metrics,
                 'eq_n_rebals': len(eq_rebal_set),
+                'bench': bench_full,
             }
         except Exception as e:
             logger.warning(f"Full sample failed for {name}: {e}")
@@ -498,6 +589,7 @@ def run_fullsample(symbols, score_type='Win Rate', n_portfolios=10000,
     if not results: return None
     return {'results': results, 'symbols': valid, 'returns': returns,
             'eq_returns': eq_ret, 'eq_rebal_set': eq_rebal_set,
+            'bench_symbols': [b[0] for b in bench], 'bench_failed': bench_failed,
             'score_type': score_type, 'rebal_months': rebal_months, 'txn_cost': txn_cost}
 
 # =============================================================================
@@ -511,6 +603,54 @@ def _fc(v, fmt='f2', neg_is_bad=True):
     if neg_is_bad: c = C_POS if v > 0 else (C_NEG if v < 0 else C_TXT)
     else: c = C_NEG
     return f"<span style='color:{c}'>{s}</span>"
+
+
+# The 10 metric columns between 'Approach' and 'OOS': (key, format, neg_is_bad)
+_RANK_COLS = [('win_rate','pct',True), ('sharpe','f2',True), ('sortino','f2',True),
+              ('mar','f2',True), ('r2','f3',True), ('total_ret','pct',True),
+              ('ann_ret','pct',True), ('ann_vol','pct',False), ('max_dd','pct',False),
+              ('ytd','pct',True)]
+
+
+def _tint(hex_color, alpha):
+    """'#c084fc' -> 'rgba(192,132,252,0.07)' for row backgrounds."""
+    h = hex_color.lstrip('#')
+    return f"rgba({int(h[:2],16)},{int(h[2:4],16)},{int(h[4:6],16)},{alpha})"
+
+
+def _compare_row(label, m, rebals, bg, label_color=C_TXT, rule=C_EW):
+    """A non-ranked comparison row (equal weight, benchmark) under the ranking."""
+    h = f"<tr><td colspan='14' style='border-bottom:1px solid {rule};padding:0;height:0'></td></tr>"
+    h += f"<tr style='background:{bg}'>"
+    h += f"<td style='{TD}color:{C_MUTE}'>&mdash;</td>"
+    h += f"<td style='{TD}color:{label_color};font-weight:700'>{label}</td>"
+    for key, fmt, nib in _RANK_COLS:
+        fw = 'font-weight:700;' if key == 'win_rate' else ('font-weight:600;' if key == 'total_ret' else '')
+        h += f"<td style='{TD}text-align:right;{fw}'>{_fc(m[key], fmt, nib)}</td>"
+    h += f"<td style='{TD}text-align:right;color:{C_TXT2}'>{m['oos_years']}y</td>"
+    h += f"<td style='{TD}text-align:right;color:{C_TXT2}'>{rebals}</td></tr>"
+    return h
+
+
+def _delta_row(label, best_m, other_m, rule=C_EW):
+    """Best approach minus a comparison row, green when the approach wins."""
+    lower_is_better = {'ann_vol', 'max_dd'}
+    h = f"<tr><td colspan='14' style='border-bottom:1px solid {rule};padding:0;height:0'></td></tr>"
+    h += "<tr style='background:rgba(251,191,36,0.06)'>"
+    h += f"<td style='{TD}color:{C_GOLD}'>&Delta;</td>"
+    h += f"<td style='{TD}color:{C_GOLD};font-weight:600'>{label}</td>"
+    for key, fmt, _nib in _RANK_COLS:
+        bv = best_m[key]; ev = other_m[key]; d = bv - ev
+        good = abs(bv) < abs(ev) if key in lower_is_better else d > 0
+        c = '#4ade80' if good else '#fb7185'; sign = '+' if d > 0 else ''
+        if fmt == 'pct': ds = f"{sign}{d*100:.1f}%"
+        elif fmt == 'f3': ds = f"{sign}{d:.3f}"
+        else: ds = f"{sign}{d:.2f}"
+        if abs(d) < 1e-6: ds = "&mdash;"; c = C_MUTE
+        h += f"<td style='{TD}text-align:right;color:{c};font-weight:600'>{ds}</td>"
+    h += f"<td style='{TD}text-align:right;color:{C_MUTE}'>&mdash;</td>"
+    h += f"<td style='{TD}text-align:right;color:{C_MUTE}'>&mdash;</td></tr>"
+    return h
 
 
 def render_ranking_table(grid, rank_by='win_rate'):
@@ -553,51 +693,19 @@ def render_ranking_table(grid, rank_by='win_rate'):
         html += f"<td style='{TD}text-align:right;color:{C_TXT2}'>{m['n_rebalances']}</td>"
         html += "</tr>"
 
-    # Equal weight row — aligned to the best approach's OOS period
+    # Comparison rows — aligned to the best approach's OOS period
     if best_name and items:
-        best_r = items[0][2]
+        best_r = items[0][2]; best_m = items[0][1]
         eq = best_r.get('eq_metrics')
-        eq_rebals = best_r.get('eq_n_rebals', '—')
         if eq:
-            html += f"<tr><td colspan='14' style='border-bottom:1px solid {C_EW};padding:0;height:0'></td></tr>"
-            html += "<tr style='background:rgba(100,116,139,0.06)'>"
-            html += f"<td style='{TD}color:{C_MUTE}'>—</td>"
-            html += f"<td style='{TD}color:{C_TXT};font-weight:700'>◆ Equal Weight (1/N)</td>"
-            html += f"<td style='{TD}text-align:right;font-weight:700'>{_fc(eq['win_rate'],'pct')}</td>"
-            html += f"<td style='{TD}text-align:right'>{_fc(eq['sharpe'])}</td>"
-            html += f"<td style='{TD}text-align:right'>{_fc(eq['sortino'])}</td>"
-            html += f"<td style='{TD}text-align:right'>{_fc(eq['mar'])}</td>"
-            html += f"<td style='{TD}text-align:right'>{_fc(eq['r2'],'f3')}</td>"
-            html += f"<td style='{TD}text-align:right;font-weight:600'>{_fc(eq['total_ret'],'pct')}</td>"
-            html += f"<td style='{TD}text-align:right'>{_fc(eq['ann_ret'],'pct')}</td>"
-            html += f"<td style='{TD}text-align:right'>{_fc(eq['ann_vol'],'pct',False)}</td>"
-            html += f"<td style='{TD}text-align:right'>{_fc(eq['max_dd'],'pct',False)}</td>"
-            html += f"<td style='{TD}text-align:right'>{_fc(eq['ytd'],'pct')}</td>"
-            html += f"<td style='{TD}text-align:right;color:{C_TXT2}'>{eq['oos_years']}y</td>"
-            html += f"<td style='{TD}text-align:right;color:{C_TXT2}'>{eq_rebals}</td></tr>"
-
-            # Delta row
-            best_m = items[0][1]
-            higher_better = {'win_rate','sharpe','sortino','mar','r2','total_ret','ann_ret','ytd'}
-            html += f"<tr><td colspan='14' style='border-bottom:1px solid {C_EW};padding:0;height:0'></td></tr>"
-            html += "<tr style='background:rgba(251,191,36,0.06)'>"
-            html += f"<td style='{TD}color:{C_GOLD}'>Δ</td>"
-            html += f"<td style='{TD}color:{C_GOLD};font-weight:600'>★ vs Equal Weight</td>"
-            for key, fmt in [('win_rate','pct'),('sharpe','f2'),('sortino','f2'),('mar','f2'),
-                             ('r2','f3'),('total_ret','pct'),('ann_ret','pct'),('ann_vol','pct'),
-                             ('max_dd','pct'),('ytd','pct')]:
-                bv = best_m[key]; ev = eq[key]; d = bv - ev
-                if key in higher_better: good = d > 0
-                elif key in {'ann_vol','max_dd'}: good = abs(bv) < abs(ev)
-                else: good = d > 0
-                c = '#4ade80' if good else '#fb7185'; sign = '+' if d > 0 else ''
-                if fmt == 'pct': ds = f"{sign}{d*100:.1f}%"
-                elif fmt == 'f3': ds = f"{sign}{d:.3f}"
-                else: ds = f"{sign}{d:.2f}"
-                if abs(d) < 1e-6: ds = "—"; c = C_MUTE
-                html += f"<td style='{TD}text-align:right;color:{c};font-weight:600'>{ds}</td>"
-            html += f"<td style='{TD}text-align:right;color:{C_MUTE}'>—</td>"
-            html += f"<td style='{TD}text-align:right;color:{C_MUTE}'>—</td></tr>"
+            html += _compare_row('◆ Equal Weight (1/N)', eq, best_r.get('eq_n_rebals', '—'),
+                                 'rgba(100,116,139,0.06)')
+            html += _delta_row('★ vs Equal Weight', best_m, eq)
+        for i, (bsym, _br, bm) in enumerate(best_r.get('bench') or []):
+            bc = BENCH_COLORS[i % len(BENCH_COLORS)]
+            html += _compare_row(f"◇ {bsym} <span style='font-size:9px;color:{C_MUTE}'>benchmark</span>",
+                                 bm, '—', _tint(bc, 0.07), label_color=bc, rule=bc)
+            html += _delta_row(f'★ vs {bsym}', best_m, bm, rule=bc)
 
     html += "</tbody></table></div>"
     st.markdown(html, unsafe_allow_html=True)
@@ -665,19 +773,37 @@ def render_oos_chart(grid, approach_name):
     eq_peak = np.maximum.accumulate(eq_cum); eq_dd = (eq_cum - eq_peak) / eq_peak
     opt_pct = (opt_cum[-1] - 1) * 100; eq_pct = (eq_cum[-1] - 1) * 100
 
+    # Optional benchmark tickers — same OOS window as the approach
+    benches = []
+    for i, (b_sym, b_ret, b_m) in enumerate(r_entry.get('bench') or []):
+        b_cum = np.cumprod(1 + b_ret.values)
+        b_peak = np.maximum.accumulate(b_cum)
+        benches.append({'sym': b_sym, 'idx': b_ret.index, 'cum': b_cum,
+                        'dd': (b_cum - b_peak) / b_peak,
+                        'color': BENCH_COLORS[i % len(BENCH_COLORS)],
+                        'label': (f'{b_sym} ({(b_cum[-1]-1)*100:+.1f}%)  '
+                                  f'Sharpe {b_m["sharpe"]:.2f} · Win {b_m["win_rate"]*100:.0f}%')})
+
     # Concise legend — just Sharpe + Win%
     opt_lbl = f'{approach_name} ({opt_pct:+.1f}%)  Sharpe {m["sharpe"]:.2f} · Win {m["win_rate"]*100:.0f}%'
     eq_lbl = f'Equal Weight ({eq_pct:+.1f}%)  Sharpe {eq_m["sharpe"]:.2f} · Win {eq_m["win_rate"]*100:.0f}%'
 
     fig = make_subplots(rows=2, cols=1, row_heights=[0.75, 0.25], shared_xaxes=True, vertical_spacing=0.04)
-    fig.add_trace(go.Scatter(x=oos.index, y=opt_cum, mode='lines', line=dict(color=pos_c, width=2),
+    fig.add_trace(go.Scatter(x=oos.index, y=opt_cum, mode='lines',
+        line=dict(color=pos_c, width=2.2),
         name=opt_lbl, hovertemplate='WF: $%{y:.3f}<extra></extra>'), row=1, col=1)
     fig.add_trace(go.Scatter(x=eq_aligned.index, y=eq_cum, mode='lines',
-        line=dict(color=C_EW, width=1.5), name=eq_lbl,
+        line=dict(color=_tint(C_EW, 0.80), width=1.2), name=eq_lbl,
         hovertemplate='EW: $%{y:.3f}<extra></extra>'), row=1, col=1)
+    # Benchmarks sit behind the strategy: thin, translucent, no dashes
+    for b in benches:
+        fig.add_trace(go.Scatter(x=b['idx'], y=b['cum'], mode='lines',
+            line=dict(color=_tint(b['color'], 0.78), width=1.2),
+            name=b['label'],
+            hovertemplate=f"{b['sym']}: $%{{y:.3f}}<extra></extra>"), row=1, col=1)
     for wh in wf['weight_history']:
         if wh['date'] >= oos.index[0]:
-            fig.add_vline(x=wh['date'], line=dict(color=C_GOLD, width=0.6, dash='dot'), opacity=0.4, row=1, col=1)
+            fig.add_vline(x=wh['date'], line=dict(color=C_GOLD, width=0.5, dash='dot'), opacity=0.22, row=1, col=1)
     fig.add_hline(y=1.0, line=dict(color='#1f1f1f', width=0.8, dash='dash'), row=1, col=1)
 
     # End value annotations
@@ -687,14 +813,24 @@ def render_oos_chart(grid, approach_name):
     fig.add_annotation(x=eq_aligned.index[-1], y=eq_cum[-1], text=f'${eq_cum[-1]:.2f}',
         showarrow=False, xanchor='left', xshift=5,
         font=dict(size=11, color=C_EW, family=FONTS), row=1, col=1)
+    for i, b in enumerate(benches):
+        # Nudge each label off the last one so close finishes stay readable
+        fig.add_annotation(x=b['idx'][-1], y=b['cum'][-1], text=f"{b['sym']} ${b['cum'][-1]:.2f}",
+            showarrow=False, xanchor='left', xshift=6, yshift=(-1) ** i * 8 * i,
+            font=dict(size=9, color=_tint(b['color'], 0.9), family=FONTS), row=1, col=1)
 
     nr = neg_c.lstrip('#'); rv, gv, bv = int(nr[:2], 16), int(nr[2:4], 16), int(nr[4:6], 16)
     fig.add_trace(go.Scatter(x=oos.index, y=opt_dd * 100, mode='lines', fill='tozeroy',
         line=dict(color=neg_c, width=1), fillcolor=f'rgba({rv},{gv},{bv},0.2)',
         name='Drawdown', showlegend=False, hovertemplate='DD: %{y:.1f}%<extra></extra>'), row=2, col=1)
     fig.add_trace(go.Scatter(x=eq_aligned.index, y=eq_dd * 100, mode='lines',
-        line=dict(color=C_EW, width=1, dash='dot'),
+        line=dict(color=_tint(C_EW, 0.45), width=0.9),
         name='EW Drawdown', showlegend=False, hovertemplate='EW DD: %{y:.1f}%<extra></extra>'), row=2, col=1)
+    for b in benches:
+        fig.add_trace(go.Scatter(x=b['idx'], y=b['dd'] * 100, mode='lines',
+            line=dict(color=_tint(b['color'], 0.40), width=0.9),
+            name=f"{b['sym']} Drawdown", showlegend=False,
+            hovertemplate=f"{b['sym']} DD: %{{y:.1f}}%<extra></extra>"), row=2, col=1)
 
     # Title — use preset name instead of symbols
     params = st.session_state.get('port_params', st.session_state.get('port_fs_params', {}))
@@ -704,8 +840,8 @@ def render_oos_chart(grid, approach_name):
     tag_color = '#60a5fa' if is_fullsample else C_GOLD
     fig.update_layout(template='plotly_dark', height=400, margin=dict(l=55, r=55, t=35, b=25),
         plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)', showlegend=True,
-        legend=dict(x=0.01, y=0.88, bgcolor='rgba(0,0,0,0)',
-                    font=dict(size=12, color='#ffffff', family=FONTS), borderwidth=0),
+        legend=dict(x=0.01, y=0.90, bgcolor='rgba(10,14,22,0.35)', tracegroupgap=2,
+                    font=dict(size=11, color='#e2e8f0', family=FONTS), borderwidth=0),
         hovermode='x unified', font=dict(family=FONTS))
     fig.add_annotation(text=f"<b>{title_name}</b>  <span style='font-size:10px;color:{tag_color}'>{mode_tag}</span>",
         x=0.01, y=0.99, xref='paper', yref='paper', showarrow=False,
