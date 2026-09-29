@@ -1,4 +1,3 @@
-import html
 import streamlit as st
 import numpy as np
 import pandas as pd
@@ -85,6 +84,57 @@ def _warn_failed(failed):
         st.warning(f"No usable history for {', '.join(failed)} — left out of the comparison")
 
 
+def _validate(symbols, max_wt_str, min_wt_str, min_pos_str, round_str, min_hist_str,
+              cost_str, sims_str, fetch_days):
+    """Catch the settings that quietly fight each other before a run burns a minute
+    on them. Returns (errors, notes): errors stop the run, notes are just FYI."""
+    errors = []; notes = []
+
+    def num(s, default=None):
+        try: return float(s) if str(s).strip() else default
+        except (ValueError, TypeError): return None
+
+    if len(symbols) < 2:
+        errors.append('Enter at least 2 symbols to build a portfolio.')
+
+    max_wt, min_wt = num(max_wt_str, 50), num(min_wt_str, 0)
+    min_pos, step = num(min_pos_str), num(round_str)
+    min_hist, cost, sims = num(min_hist_str), num(cost_str, 0.10), num(sims_str, 10000)
+
+    if max_wt is None: errors.append('Max Wt % must be a number.')
+    if min_wt is None: errors.append('Min Wt % must be a number.')
+    if num(min_pos_str, 0) is None: errors.append('Min Pos % must be a number, or blank.')
+    if num(round_str, 0) is None: errors.append('Round % must be a number, or blank.')
+    if num(min_hist_str, 0) is None: errors.append('Min Hist Y must be a number, or blank.')
+    if cost is None: errors.append('Cost % must be a number.')
+    if sims is None: errors.append('Sims must be a number.')
+    if errors: return errors, notes
+
+    n = max(len(symbols), 1)
+    if min_wt and max_wt and min_wt >= max_wt:
+        notes.append(f'Min Wt {min_wt:g}% is not below Max Wt {max_wt:g}% \u2014 the floor will be ignored.')
+    if min_wt and min_wt * n > 100:
+        notes.append(f'Min Wt {min_wt:g}% across {n} symbols needs {min_wt * n:.0f}% \u2014 '
+                     f'it will be cut to {100 / n:.2f}%, the most that fits.')
+    if max_wt and max_wt * n < 100:
+        errors.append(f'Max Wt {max_wt:g}% across {n} symbols caps the portfolio at {max_wt * n:.0f}%. '
+                      f'Raise it to at least {100 / n:.1f}%.')
+    if min_pos and max_wt and min_pos >= max_wt:
+        errors.append(f'Min Pos {min_pos:g}% is at or above Max Wt {max_wt:g}%, so every position would be dropped.')
+    if step and max_wt and step > max_wt:
+        errors.append(f'Round {step:g}% is coarser than Max Wt {max_wt:g}% \u2014 nothing could round to a valid weight.')
+    if min_pos and step and step > min_pos:
+        notes.append(f'Round {step:g}% is coarser than Min Pos {min_pos:g}%, so rounding decides what survives.')
+    if min_hist and min_hist * 365 >= fetch_days:
+        errors.append(f'Min Hist {min_hist:g}y needs more history than Period fetches '
+                      f'({fetch_days / 365:.1f}y), so every symbol would be excluded.')
+    if sims and sims < 1000:
+        notes.append(f'Sims {sims:.0f} is below the 1,000 minimum \u2014 it will be raised to 1,000.')
+    if cost and cost > 5:
+        notes.append(f'Cost {cost:g}% is above the 5% cap \u2014 it will be clamped.')
+    return errors, notes
+
+
 def render_single_tab(is_mobile):
     import portfolio
     theme_name = st.session_state.get('theme', 'Dark')
@@ -92,14 +142,15 @@ def render_single_tab(is_mobile):
     portfolio.C_POS = theme['pos']; portfolio.C_NEG = theme['neg']
     _lbl = f"color:#f8fafc;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;font-family:{FONTS}"
 
-    def _fld(text, tip):
-        """Field label with a hover description — the ⓘ marks that one exists."""
-        t = html.escape(tip, quote=True)
-        return (f"<div style='{_lbl}' title=\"{t}\">{text}"
-                f"<span style='color:#64748b;font-weight:400;margin-left:3px' title=\"{t}\">ⓘ</span></div>")
-
-    # Consistent input styling
+    # Native Streamlit labels, restyled to the SANPO scale. They were hand-rolled
+    # markdown before, which the tab container clipped to a sliver -- the fields
+    # ended up effectively unlabelled.
     st.markdown(f"""<style>
+        .stSelectbox label p, .stTextInput label p {{
+            font-size: 10px !important; font-weight: 600 !important; text-transform: uppercase;
+            letter-spacing: 0.08em; color: #cbd5e1 !important; font-family: {FONTS} !important;
+        }}
+        .stSelectbox label, .stTextInput label {{ margin-bottom: 1px !important; }}
         div[data-baseweb="select"] span,
         div[data-baseweb="select"] div[aria-selected] {{
             font-family: {FONTS} !important; font-size: 13px !important; letter-spacing: 0.01em !important;
@@ -111,125 +162,130 @@ def render_single_tab(is_mobile):
         .stTextInput input::placeholder {{ font-family: {FONTS} !important; font-size: 13px !important; }}
     </style>""", unsafe_allow_html=True)
 
-    # Row 0: Mode + Portfolio + Symbols
+    def _group(title, blurb):
+        st.markdown(f"<div style='margin:16px 0 7px;font-family:{FONTS}'>"
+                    f"<span style='color:#f8fafc;font-size:10px;font-weight:700;letter-spacing:0.1em'>{title}</span>"
+                    f"<span style='color:#64748b;font-size:10px;margin-left:8px'>{blurb}</span></div>",
+                    unsafe_allow_html=True)
+
     group_names = ['Custom'] + list(FUTURES_GROUPS.keys())
-    if 'port_preset_name' not in st.session_state:
-        st.session_state.port_preset_name = 'Custom'
-    if 'port_sym_input' not in st.session_state:
-        st.session_state.port_sym_input = ''
+    _defaults = {'port_preset_name': 'Custom', 'port_sym_input': '', 'port_sims': '10000',
+                 'port_maxwt': '50', 'port_minwt': '0', 'port_cost': '0.10', 'port_maxvol': '',
+                 'port_minret': '', 'port_minpos': '', 'port_round': '', 'port_minhist': ''}
+    for k, v in _defaults.items():
+        if k not in st.session_state: st.session_state[k] = v
+    for k, v in [('port_maxwt', '50'), ('port_minwt', '0'), ('port_cost', '0.10'), ('port_sims', '10000')]:
+        if not st.session_state.get(k): st.session_state[k] = v
 
     def _on_portfolio_change():
         sel = st.session_state.port_selector
         if sel != 'Custom':
-            syms = FUTURES_GROUPS.get(sel, [])
-            st.session_state.port_sym_input = ', '.join(syms)
+            st.session_state.port_sym_input = ', '.join(FUTURES_GROUPS.get(sel, []))
         st.session_state.port_preset_name = sel
 
-    m0, p1, p2, p3 = st.columns([3, 2, 3.4, 2.2])
-    with m0:
-        st.markdown(_fld('MODE', 'How the weights are chosen. Walk-Forward: optimise on past data only, then score the period that follows (out-of-sample, the honest test). Full Sample: optimise on all the data and score the same data (in-sample, flattering). Equal Weight: no optimisation at all, every asset gets 1/N.'), unsafe_allow_html=True)
-        mode = st.selectbox("Mode", ['Monte Carlo (Walk-Forward)', 'Monte Carlo (Full Sample)', 'Equal Weight'],
-                             key='port_mode', label_visibility='collapsed')
-    with p1:
-        st.markdown(_fld('PORTFOLIO', 'Load a saved basket of symbols into the Symbols box, or pick Custom and type your own.'), unsafe_allow_html=True)
-        current_idx = group_names.index(st.session_state.port_preset_name) if st.session_state.port_preset_name in group_names else 0
-        st.selectbox("Portfolio", group_names, index=current_idx,
-                     key='port_selector', label_visibility='collapsed', on_change=_on_portfolio_change)
-    with p2:
-        st.markdown(_fld('SYMBOLS', 'The tickers to allocate between, comma-separated (Yahoo Finance symbols). These are what the optimiser splits money across. Need at least 2.'), unsafe_allow_html=True)
-        sym_input = st.text_input("Symbols", key='port_sym_input', label_visibility='collapsed',
-                                   placeholder='AAPL, MSFT, GOOG, ...')
-    with p3:
-        st.markdown(_fld('BENCHMARK', 'Optional comparison tickers, comma-separated, up to 4 (e.g. SPY, XLV, XLB). They are NOT part of the portfolio and get no weight — each one is drawn on the chart and added to the ranking table so you can see whether the portfolio actually beat it.'), unsafe_allow_html=True)
-        bench_input = st.text_input("Benchmark", key='port_bench', label_visibility='collapsed',
-                                     placeholder=f'optional, e.g. SPY, XLV (max {MAX_BENCHMARKS})')
+    # ---------------------------------------------------------------- what to trade
+    _group('WHAT TO TRADE', 'the basket, and what to measure it against')
+    a1, a2, a3, a4 = st.columns(4)
+    with a1:
+        mode = st.selectbox('Mode', ['Monte Carlo (Walk-Forward)', 'Monte Carlo (Full Sample)', 'Equal Weight'],
+                            key='port_mode',
+                            help='How the weights are chosen. Walk-Forward optimises on past data only and scores the '
+                                 'period that follows, which is the honest test. Full Sample optimises on all the data '
+                                 'and scores the same data, which flatters. Equal Weight skips optimisation: every '
+                                 'asset gets 1/N.')
+    with a2:
+        idx = group_names.index(st.session_state.port_preset_name) if st.session_state.port_preset_name in group_names else 0
+        st.selectbox('Preset', group_names, index=idx, key='port_selector', on_change=_on_portfolio_change,
+                     help='Load a saved basket into Symbols, or pick Custom and type your own.')
+    with a3:
+        sym_input = st.text_input('Symbols', key='port_sym_input', placeholder='AAPL, MSFT, GOOG, ...',
+                                  help='The tickers to split money across, comma-separated (Yahoo symbols). '
+                                       'At least 2.')
+    with a4:
+        bench_input = st.text_input('Benchmark (optional)', key='port_bench',
+                                    placeholder=f'e.g. SPY, XLV (max {MAX_BENCHMARKS})',
+                                    help='Comparison tickers, comma-separated. They get no weight and are not part of '
+                                         'the portfolio \u2014 each is drawn on the chart and added to the ranking '
+                                         'table so you can see whether the portfolio beat it.')
 
     is_mc = mode == 'Monte Carlo (Walk-Forward)'
     is_fs = mode == 'Monte Carlo (Full Sample)'
     _dis = not (is_mc or is_fs)
 
-    # Row 1: Objective, Rebalance, Period, Direction, Sims
-    c1, c2, c3, c13, c4, c5 = st.columns(6)
+    # ---------------------------------------------------------------- how to test
+    _group('HOW TO TEST', 'what the optimiser aims at, and over what history')
+    b1, b2, b3, b4 = st.columns(4)
+    with b1:
+        score = st.selectbox('Objective', ['Win Rate', 'Composite', 'Sharpe', 'Sortino', 'MAR', 'R\u00b2', 'Total Return'],
+                             key='port_score', disabled=_dis,
+                             help='What the optimiser maximises. Win Rate = share of up days. Sharpe = return per unit '
+                                  'of volatility. Sortino = same but only downside volatility. MAR = return per unit of '
+                                  'average drawdown. R\u00b2 = how straight the equity curve is. Total Return = raw growth.')
+    with b2:
+        rebal_label = st.selectbox('Rebalance', list(REBAL_OPTIONS.keys()), index=2, key='port_rebal',
+                                   help='How often holdings are reset to target weights. Every reset pays Cost % on what '
+                                        'it trades, so more frequent is not automatically better.')
+    with b3:
+        period_label = st.selectbox('Period', list(PERIOD_OPTIONS.keys()), index=2, key='port_period',
+                                    help='How much price history to pull. Longer gives more to learn from and a longer '
+                                         'backtest, but drags in older market regimes.')
+    with b4:
+        direction = st.selectbox('Direction', ['Long Only', 'Long/Short'], key='port_direction', disabled=_dis,
+                                 help='Long Only keeps every weight at 0 or above. Long/Short allows negative weights, '
+                                      'so the portfolio can short (Min Wt % is ignored then).')
+
+    # ---------------------------------------------------------------- how to execute
+    _group('HOW TO EXECUTE', 'shape the weights into something you can actually trade')
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
-        st.markdown(_fld('OBJECTIVE', 'The number the optimiser tries to maximise when it picks weights: Win Rate = share of up days, Sharpe = return per unit of volatility, Sortino = return per unit of downside volatility, MAR = return per unit of average drawdown, R² = how straight the equity curve is, Total Return = raw growth.'), unsafe_allow_html=True)
-        score = st.selectbox("Objective", ['Win Rate', 'Composite', 'Sharpe', 'Sortino', 'MAR', 'R²', 'Total Return'],
-                              key='port_score', label_visibility='collapsed', disabled=_dis)
+        min_pos_str = st.text_input('Min Pos % (drop below)', key='port_minpos', placeholder='e.g. 1', disabled=_dis,
+                                    help='Dust cut. After the weights are chosen, anything under this goes to 0 and the '
+                                         'rest are rescaled to 100%. Set 1 and a 0.4% sliver becomes nothing. Blank '
+                                         'keeps every sliver. The opposite of Min Wt %: this throws assets out.')
     with c2:
-        st.markdown(_fld('REBALANCE', 'How often holdings are reset back to target weights. Every reset pays the Cost % on whatever it has to trade, so more frequent is not automatically better.'), unsafe_allow_html=True)
-        rebal_label = st.selectbox("Rebalance", list(REBAL_OPTIONS.keys()),
-                                    index=2, key='port_rebal', label_visibility='collapsed')
+        round_str = st.text_input('Round % (step)', key='port_round', placeholder='e.g. 1', disabled=_dis,
+                                  help='Snap the final weights to a clean step: 1 gives whole percents (34%, 29%, 0%), '
+                                       '0.5 gives half percents. Under half a step rounds to 0, and the weights still '
+                                       'add to exactly 100%. Pair with Min Pos % to be sure slivers are gone.')
     with c3:
-        st.markdown(_fld('PERIOD', 'How much price history to pull. Longer means more data to learn from and a longer backtest, but it also drags in older market regimes.'), unsafe_allow_html=True)
-        period_label = st.selectbox("Period", list(PERIOD_OPTIONS.keys()),
-                                     index=2, key='port_period', label_visibility='collapsed')
-    with c13:
-        st.markdown(_fld('MIN HIST Y', 'Leave out symbols that have not been listed this long, in years. A single '
-                                       'recent IPO drags the whole basket down to its own listing date, because every '
-                                       'asset has to have a price on every day of the backtest -- set 2 and anything '
-                                       'listed under 2 years ago is excluded, and the rest keep their longer shared '
-                                       'history. The run tells you which symbols it dropped. Blank = keep them all.'),
-                    unsafe_allow_html=True)
-        min_hist_str = st.text_input("Min Hist", key='port_minhist', label_visibility='collapsed',
-                                      placeholder='e.g. 2')
+        max_wt_str = st.text_input('Max Wt %', key='port_maxwt', disabled=_dis,
+                                   help='Ceiling on any single asset, so nothing dominates. 50 means no holding above 50%.')
     with c4:
-        st.markdown(_fld('DIRECTION', 'Long Only: every weight is 0 or positive. Long/Short: negative weights are allowed, so the portfolio can short (note that Min Wt % is ignored in this mode).'), unsafe_allow_html=True)
-        direction = st.selectbox("Direction", ['Long Only', 'Long/Short'],
-                                  key='port_direction', label_visibility='collapsed', disabled=_dis)
-    with c5:
-        st.markdown(_fld('SIMS', 'How many random weight combinations to test per lookback window. Higher gives a steadier answer but takes longer. 10,000 is a good default.'), unsafe_allow_html=True)
-        if 'port_sims' not in st.session_state: st.session_state['port_sims'] = '10000'
-        if not st.session_state.get('port_sims'): st.session_state['port_sims'] = '10000'
-        sims_str = st.text_input("Sims", key='port_sims', label_visibility='collapsed', disabled=_dis)
+        min_wt_str = st.text_input('Min Wt %', key='port_minwt', disabled=_dis,
+                                   help='Floor on EVERY asset \u2014 it forces each one in at this weight or more. '
+                                        '0 means no floor. It keeps assets in; it does not round anything.')
 
-    # Row 2: Max Wt, Min Wt, Max Vol, Min Ret, Cost
-    if 'port_minhist' not in st.session_state: st.session_state['port_minhist'] = ''
-    _defaults2 = {'port_maxwt': '50', 'port_minwt': '0', 'port_cost': '0.10',
-                   'port_maxvol': '', 'port_minret': '', 'port_minpos': '', 'port_round': ''}
-    for k, v in _defaults2.items():
-        if k not in st.session_state: st.session_state[k] = v
-    for k, v in [('port_maxwt','50'),('port_minwt','0'),('port_cost','0.10')]:
-        if not st.session_state.get(k): st.session_state[k] = v
-
-    c6, c7, c11, c12, c8, c9, c10 = st.columns(7)
-    with c6:
-        st.markdown(_fld('MAX WT %', 'Ceiling on any single asset, so nothing can dominate. 50 means no holding above 50%.'), unsafe_allow_html=True)
-        max_wt_str = st.text_input("Max Wt", key='port_maxwt', label_visibility='collapsed', disabled=_dis)
-    with c7:
-        st.markdown(_fld('MIN WT %', 'Floor on EVERY asset — it forces each one into the portfolio at this weight or more. 0 means no floor. This keeps assets in; it does not round anything.'), unsafe_allow_html=True)
-        min_wt_str = st.text_input("Min Wt", key='port_minwt', label_visibility='collapsed', disabled=_dis)
-    with c11:
-        st.markdown(_fld('MIN POS %', 'Dust cut. After the weights are chosen, anything smaller than this is set to 0 and the remaining positions are rescaled back to 100%. Use it to avoid trading pointless slivers — e.g. 1 turns a 0.4% position into nothing. Leave blank to keep every sliver. This is the opposite of Min Wt %: it throws assets out rather than forcing them in.'), unsafe_allow_html=True)
-        min_pos_str = st.text_input("Min Pos", key='port_minpos', label_visibility='collapsed',
-                                     placeholder='drop <1%', disabled=_dis)
-    with c12:
-        st.markdown(_fld('ROUND %', 'Snap the final weights to a clean step so they are tradeable: 1 rounds '
-                                    'everything to whole percents (34%, 29%, 0%), 0.5 to half percents. Anything '
-                                    'under half a step rounds away to 0, and the leftovers are handed out so the '
-                                    'weights still add to exactly 100% -- which means a sliver can occasionally be '
-                                    'pushed up to one step to make the total land. Pair it with Min Pos % if you '
-                                    'want slivers gone for certain. Blank = leave the raw weights alone.'),
-                    unsafe_allow_html=True)
-        round_str = st.text_input("Round", key='port_round', label_visibility='collapsed',
-                                   placeholder='e.g. 1', disabled=_dis)
-    with c8:
-        st.markdown(_fld('MAX VOL %', 'Soft cap on annualised volatility. Portfolios above it are penalised in the search rather than banned outright, so the result can still exceed it if nothing else works. Blank = no cap.'), unsafe_allow_html=True)
-        max_vol_str = st.text_input("Max Vol", key='port_maxvol', label_visibility='collapsed',
-                                     placeholder='e.g. 15', disabled=_dis)
-    with c9:
-        st.markdown(_fld('MIN RET %', 'Soft floor on annualised return. Portfolios below it are penalised in the search rather than banned. Blank = no floor.'), unsafe_allow_html=True)
-        min_ret_str = st.text_input("Min Ret", key='port_minret', label_visibility='collapsed',
-                                     placeholder='e.g. 5', disabled=_dis)
-    with c10:
-        st.markdown(_fld('COST %', 'Round-trip transaction cost charged on turnover at every rebalance, in percent. 0.10 = 10 basis points.'), unsafe_allow_html=True)
-        cost_str = st.text_input("Cost", key='port_cost', label_visibility='collapsed')
+    # ---------------------------------------------------------------- the rest
+    with st.expander('More settings \u2014 data, constraints and cost'):
+        d1, d2, d3, d4, d5 = st.columns(5)
+        with d1:
+            min_hist_str = st.text_input('Min Hist Y', key='port_minhist', placeholder='e.g. 2',
+                                         help='Leave out symbols listed more recently than this many years. Every asset '
+                                              'needs a price on every day of the backtest, so one recent IPO drags the '
+                                              'whole basket down to its listing date. The run says what it dropped.')
+        with d2:
+            sims_str = st.text_input('Sims', key='port_sims', disabled=_dis,
+                                     help='Random weight combinations tested per lookback window. Higher is steadier '
+                                          'but slower. 10,000 is a good default.')
+        with d3:
+            max_vol_str = st.text_input('Max Vol %', key='port_maxvol', placeholder='e.g. 15', disabled=_dis,
+                                        help='Soft cap on annualised volatility. Portfolios above it are penalised in '
+                                             'the search rather than banned, so the result can still exceed it.')
+        with d4:
+            min_ret_str = st.text_input('Min Ret %', key='port_minret', placeholder='e.g. 5', disabled=_dis,
+                                        help='Soft floor on annualised return. Portfolios below it are penalised in the '
+                                             'search rather than banned.')
+        with d5:
+            cost_str = st.text_input('Cost %', key='port_cost',
+                                     help='Transaction cost charged on turnover at every rebalance. 0.10 = 10 basis points.')
 
     # Run button
     if is_mc:
-        btn_label = '▶  Optimize (WF)'
+        btn_label = '\u25b6  Optimize (WF)'
     elif is_fs:
-        btn_label = '▶  Optimize (Full)'
+        btn_label = '\u25b6  Optimize (Full)'
     else:
-        btn_label = '▶  Run EW'
+        btn_label = '\u25b6  Run EW'
     run_clicked = st.button(btn_label, key='port_run', type='primary')
 
     # Determine session key based on mode to avoid cross-contamination
@@ -262,6 +318,12 @@ def render_single_tab(is_mobile):
             st.warning('Enter symbols'); return
         symbols = [s.strip().upper() for s in raw.replace(';', ',').split(',') if s.strip()]
         symbols = list(dict.fromkeys(symbols))
+
+        errors, notes = _validate(symbols, max_wt_str, min_wt_str, min_pos_str, round_str,
+                                  min_hist_str, cost_str, sims_str, fetch_days)
+        for e in errors: st.error(e)
+        for note in notes: st.caption(note)
+        if errors: return
 
         bench = _clean_benchmarks(bench_input)
         try: min_hist_days = int(max(0, min(20, float(min_hist_str))) * 365) if min_hist_str.strip() else 0
