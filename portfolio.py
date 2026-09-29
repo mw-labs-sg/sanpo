@@ -282,8 +282,29 @@ def _apply_min_pos(w, min_pos, max_weight=None):
     return out
 
 
+def _round_weights(w, step):
+    """Snap weights to a step (0.01 = whole percents) using largest-remainder, so
+    the rounded weights still add to exactly 100% instead of 99.9 or 100.1.
+    Anything under half a step rounds away to 0 — a 0.4% sliver at step 1% goes."""
+    if not step or step <= 0: return w
+    units = int(round(1.0 / step))
+    if units <= 0: return w
+    raw = w * units
+    base = np.floor(raw)
+    remainder = raw - base
+    short = int(round(units - base.sum()))
+    if short > 0:
+        # Hand the leftover units to the weights that lost the most to flooring
+        for i in np.argsort(-remainder)[:short]: base[i] += 1
+    elif short < 0:
+        for i in np.argsort(remainder):
+            if short == 0: break
+            if base[i] > 0: base[i] -= 1; short += 1
+    return base / units
+
+
 def _optimize_at_rebalance(returns_df, approach, score_type, n_portfolios, mw, mnw=0.0, allow_short=False,
-                           max_vol=None, min_ann_ret=None, window_cache=None, min_pos=0.0):
+                           max_vol=None, min_ann_ret=None, window_cache=None, min_pos=0.0, round_step=0.0):
     n_assets = returns_df.shape[1]; data_len = len(returns_df)
     window_weights_list = []; blend_wts = []
     for wname, wdays in approach['windows'].items():
@@ -303,13 +324,13 @@ def _optimize_at_rebalance(returns_df, approach, score_type, n_portfolios, mw, m
     all_w = np.array(window_weights_list)
     opt_w = np.average(all_w, axis=0, weights=blend_wts)
     opt_w /= opt_w.sum()
-    return _apply_min_pos(opt_w, min_pos, mw)
+    return _round_weights(_apply_min_pos(opt_w, min_pos, mw), round_step)
 
 
 def _walk_forward_single(returns_df, approach, score_type, rebal_months,
                          n_portfolios=10000, max_weight=0.50, min_weight=0.0,
                          txn_cost=0.001, allow_short=False,
-                         max_vol=None, min_ann_ret=None, window_cache=None, min_pos=0.0):
+                         max_vol=None, min_ann_ret=None, window_cache=None, min_pos=0.0, round_step=0.0):
     n_assets = returns_df.shape[1]; mw = max_weight; mnw = min_weight
     min_is_days = max(approach['windows'].values()); dates = returns_df.index
 
@@ -347,7 +368,7 @@ def _walk_forward_single(returns_df, approach, score_type, rebal_months,
         is_data = returns_df.iloc[:ri + 1]
         opt_w = _optimize_at_rebalance(is_data, approach, score_type, n_portfolios, mw, mnw, allow_short,
                                         max_vol=max_vol, min_ann_ret=min_ann_ret, window_cache=window_cache,
-                                        min_pos=min_pos)
+                                        min_pos=min_pos, round_step=round_step)
         if opt_w is None: continue
         oos_start = ri + 1
         oos_end = rebal_dates[i + 1][0] if i + 1 < len(rebal_dates) else len(dates)
@@ -365,7 +386,7 @@ def _walk_forward_single(returns_df, approach, score_type, rebal_months,
     if not oos_segments or len(weight_history) < 2: return None
     current_w = _optimize_at_rebalance(returns_df, approach, score_type, n_portfolios, mw, mnw, allow_short,
                                         max_vol=max_vol, min_ann_ret=min_ann_ret, window_cache=window_cache,
-                                        min_pos=min_pos)
+                                        min_pos=min_pos, round_step=round_step)
     if current_w is None: current_w = weight_history[-1]['weights']
     full_oos = pd.concat(oos_segments)
     return {'oos_returns': full_oos, 'weight_history': weight_history,
@@ -412,7 +433,7 @@ def _calc_oos_metrics(returns_series):
 def run_walkforward_grid(symbols, score_type='Win Rate', rebal_months=3, n_portfolios=10000,
                          fetch_days=1800, max_weight=0.50, min_weight=0.0,
                          txn_cost=0.001, allow_short=False, progress_bar=None,
-                         max_vol=None, min_ann_ret=None, benchmarks=None, min_pos=0.0):
+                         max_vol=None, min_ann_ret=None, benchmarks=None, min_pos=0.0, round_step=0.0):
     data, valid = fetch_symbol_history(tuple(symbols), days=fetch_days)
     if data is None or len(valid) < 2: return None
     returns = data.pct_change().dropna(); n_assets = len(valid)
@@ -457,7 +478,7 @@ def run_walkforward_grid(symbols, score_type='Win Rate', rebal_months=3, n_portf
             wf = _walk_forward_single(returns, approach, score_type, rebal_months,
                                       n_portfolios, max_weight, min_weight, txn_cost, allow_short,
                                       max_vol=max_vol, min_ann_ret=min_ann_ret,
-                                      window_cache=window_cache, min_pos=min_pos)
+                                      window_cache=window_cache, min_pos=min_pos, round_step=round_step)
             if wf is not None:
                 metrics = _calc_oos_metrics(wf['oos_returns'])
                 if metrics is not None:
@@ -488,7 +509,8 @@ def run_walkforward_grid(symbols, score_type='Win Rate', rebal_months=3, n_portf
 def run_fullsample(symbols, score_type='Win Rate', n_portfolios=10000,
                    fetch_days=1800, max_weight=0.50, min_weight=0.0,
                    txn_cost=0.001, allow_short=False, progress_bar=None,
-                   max_vol=None, min_ann_ret=None, rebal_months=3, benchmarks=None, min_pos=0.0):
+                   max_vol=None, min_ann_ret=None, rebal_months=3, benchmarks=None, min_pos=0.0,
+                   round_step=0.0):
     """Run MC optimization on full dataset — no walk-forward split.
     Tests all PORTFOLIO_APPROACHES lookback windows that fit in the data,
     returns weights + in-sample backtest for each."""
@@ -548,7 +570,8 @@ def run_fullsample(symbols, score_type='Win Rate', n_portfolios=10000,
             opt_w = _optimize_at_rebalance(returns, approach, score_type, n_portfolios,
                                            max_weight, min_weight, allow_short,
                                            max_vol=max_vol, min_ann_ret=min_ann_ret,
-                                           window_cache=window_cache, min_pos=min_pos)
+                                           window_cache=window_cache, min_pos=min_pos,
+                                           round_step=round_step)
             if opt_w is None:
                 continue
 

@@ -118,13 +118,13 @@ def render_single_tab(is_mobile):
 
     # Row 2: Max Wt, Min Wt, Max Vol, Min Ret, Cost
     _defaults2 = {'port_maxwt': '50', 'port_minwt': '0', 'port_cost': '0.10',
-                   'port_maxvol': '', 'port_minret': '', 'port_minpos': ''}
+                   'port_maxvol': '', 'port_minret': '', 'port_minpos': '', 'port_round': ''}
     for k, v in _defaults2.items():
         if k not in st.session_state: st.session_state[k] = v
     for k, v in [('port_maxwt','50'),('port_minwt','0'),('port_cost','0.10')]:
         if not st.session_state.get(k): st.session_state[k] = v
 
-    c6, c7, c11, c8, c9, c10 = st.columns(6)
+    c6, c7, c11, c12, c8, c9, c10 = st.columns(7)
     with c6:
         st.markdown(_fld('MAX WT %', 'Ceiling on any single asset, so nothing can dominate. 50 means no holding above 50%.'), unsafe_allow_html=True)
         max_wt_str = st.text_input("Max Wt", key='port_maxwt', label_visibility='collapsed', disabled=_dis)
@@ -135,6 +135,16 @@ def render_single_tab(is_mobile):
         st.markdown(_fld('MIN POS %', 'Dust cut. After the weights are chosen, anything smaller than this is set to 0 and the remaining positions are rescaled back to 100%. Use it to avoid trading pointless slivers — e.g. 1 turns a 0.4% position into nothing. Leave blank to keep every sliver. This is the opposite of Min Wt %: it throws assets out rather than forcing them in.'), unsafe_allow_html=True)
         min_pos_str = st.text_input("Min Pos", key='port_minpos', label_visibility='collapsed',
                                      placeholder='drop <1%', disabled=_dis)
+    with c12:
+        st.markdown(_fld('ROUND %', 'Snap the final weights to a clean step so they are tradeable: 1 rounds '
+                                    'everything to whole percents (34%, 29%, 0%), 0.5 to half percents. Anything '
+                                    'under half a step rounds away to 0, and the leftovers are handed out so the '
+                                    'weights still add to exactly 100% -- which means a sliver can occasionally be '
+                                    'pushed up to one step to make the total land. Pair it with Min Pos % if you '
+                                    'want slivers gone for certain. Blank = leave the raw weights alone.'),
+                    unsafe_allow_html=True)
+        round_str = st.text_input("Round", key='port_round', label_visibility='collapsed',
+                                   placeholder='e.g. 1', disabled=_dis)
     with c8:
         st.markdown(_fld('MAX VOL %', 'Soft cap on annualised volatility. Portfolios above it are penalised in the search rather than banned outright, so the result can still exceed it if nothing else works. Blank = no cap.'), unsafe_allow_html=True)
         max_vol_str = st.text_input("Max Vol", key='port_maxvol', label_visibility='collapsed',
@@ -191,11 +201,11 @@ def render_single_tab(is_mobile):
         if is_mc:
             _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
                     direction, sims_str, max_wt_str, min_wt_str, max_vol_str, min_ret_str,
-                    txn_cost, bench, min_pos_str)
+                    txn_cost, bench, min_pos_str, round_str)
         elif is_fs:
             _run_fs(symbols, score, rebal_label, rebal, period_label, fetch_days,
                     direction, sims_str, max_wt_str, min_wt_str, max_vol_str, min_ret_str,
-                    txn_cost, bench, min_pos_str)
+                    txn_cost, bench, min_pos_str, round_str)
         else:
             _run_ew(symbols, rebal, fetch_days, txn_cost, rebal_label, period_label, bench)
 
@@ -214,7 +224,7 @@ def render_single_tab(is_mobile):
 
 def _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
             direction, sims_str, max_wt_str, min_wt_str, max_vol_str, min_ret_str,
-            txn_cost, benchmark=(), min_pos_str=''):
+            txn_cost, benchmark=(), min_pos_str='', round_str=''):
     try: max_wt = max(10, min(100, float(max_wt_str))) / 100.0
     except (ValueError, TypeError): max_wt = 0.50
     try: min_wt = max(0, min(50, float(min_wt_str))) / 100.0
@@ -227,6 +237,8 @@ def _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
     except (ValueError, TypeError): min_ann_ret = None
     try: min_pos = max(0, min(50, float(min_pos_str))) / 100.0 if min_pos_str.strip() else 0.0
     except (ValueError, TypeError): min_pos = 0.0
+    try: round_step = max(0.1, min(25, float(round_str))) / 100.0 if round_str.strip() else 0.0
+    except (ValueError, TypeError): round_step = 0.0
 
     allow_short = direction == 'Long/Short'
     n_syms = len(symbols)
@@ -240,7 +252,7 @@ def _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
                                  txn_cost=txn_cost, allow_short=allow_short,
                                  progress_bar=progress,
                                  max_vol=max_vol, min_ann_ret=min_ann_ret,
-                                 benchmarks=benchmark, min_pos=min_pos)
+                                 benchmarks=benchmark, min_pos=min_pos, round_step=round_step)
     progress.empty()
 
     if not grid or not grid['results']:
@@ -261,7 +273,7 @@ def _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
         'period_label': st.session_state.get('port_period', '5 Years'),
         'direction': 'L/S' if allow_short else 'Long',
         'min_wt': min_wt, 'max_wt': max_wt, 'n_sims': n_sims, 'txn_cost': txn_cost,
-        'max_vol': max_vol, 'min_ann_ret': min_ann_ret, 'min_pos': min_pos,
+        'max_vol': max_vol, 'min_ann_ret': min_ann_ret, 'min_pos': min_pos, 'round_step': round_step,
         'preset_name': preset_name,
     }
     if 'port_view_approach' in st.session_state:
@@ -280,6 +292,7 @@ def _display_mc(is_mobile, _lbl):
     if params.get('max_vol'): constraints_str += f" · max vol {params['max_vol']*100:.0f}%"
     if params.get('min_ann_ret'): constraints_str += f" · min ret {params['min_ann_ret']*100:.0f}%"
     if params.get('min_pos'): constraints_str += f" · drop <{params['min_pos']*100:g}%"
+    if params.get('round_step'): constraints_str += f" · round to {params['round_step']*100:g}%"
     bench_syms = grid.get('bench_symbols') or []
     if bench_syms: constraints_str += f" · vs {', '.join(bench_syms)}"
     _section('APPROACH RANKING',
@@ -336,7 +349,7 @@ def _display_mc(is_mobile, _lbl):
 
 def _run_fs(symbols, score, rebal_label, rebal, period_label, fetch_days,
             direction, sims_str, max_wt_str, min_wt_str, max_vol_str, min_ret_str,
-            txn_cost, benchmark=(), min_pos_str=''):
+            txn_cost, benchmark=(), min_pos_str='', round_str=''):
     try: max_wt = max(10, min(100, float(max_wt_str))) / 100.0
     except (ValueError, TypeError): max_wt = 0.50
     try: min_wt = max(0, min(50, float(min_wt_str))) / 100.0
@@ -349,6 +362,8 @@ def _run_fs(symbols, score, rebal_label, rebal, period_label, fetch_days,
     except (ValueError, TypeError): min_ann_ret = None
     try: min_pos = max(0, min(50, float(min_pos_str))) / 100.0 if min_pos_str.strip() else 0.0
     except (ValueError, TypeError): min_pos = 0.0
+    try: round_step = max(0.1, min(25, float(round_str))) / 100.0 if round_str.strip() else 0.0
+    except (ValueError, TypeError): round_step = 0.0
 
     allow_short = direction == 'Long/Short'
     n_syms = len(symbols)
@@ -361,7 +376,8 @@ def _run_fs(symbols, score, rebal_label, rebal, period_label, fetch_days,
                           txn_cost=txn_cost, allow_short=allow_short,
                           progress_bar=progress,
                           max_vol=max_vol, min_ann_ret=min_ann_ret,
-                          rebal_months=rebal, benchmarks=benchmark, min_pos=min_pos)
+                          rebal_months=rebal, benchmarks=benchmark, min_pos=min_pos,
+                          round_step=round_step)
     progress.empty()
 
     if not grid or not grid['results']:
@@ -382,7 +398,7 @@ def _run_fs(symbols, score, rebal_label, rebal, period_label, fetch_days,
         'period_label': st.session_state.get('port_period', '5 Years'),
         'direction': 'L/S' if allow_short else 'Long',
         'min_wt': min_wt, 'max_wt': max_wt, 'n_sims': n_sims, 'txn_cost': txn_cost,
-        'max_vol': max_vol, 'min_ann_ret': min_ann_ret, 'min_pos': min_pos,
+        'max_vol': max_vol, 'min_ann_ret': min_ann_ret, 'min_pos': min_pos, 'round_step': round_step,
         'preset_name': preset_name,
     }
     if 'port_fs_view_approach' in st.session_state:
@@ -401,6 +417,7 @@ def _display_fs(is_mobile, _lbl):
     if params.get('max_vol'): constraints_str += f" · max vol {params['max_vol']*100:.0f}%"
     if params.get('min_ann_ret'): constraints_str += f" · min ret {params['min_ann_ret']*100:.0f}%"
     if params.get('min_pos'): constraints_str += f" · drop <{params['min_pos']*100:g}%"
+    if params.get('round_step'): constraints_str += f" · round to {params['round_step']*100:g}%"
     bench_syms = grid.get('bench_symbols') or []
     if bench_syms: constraints_str += f" · vs {', '.join(bench_syms)}"
     _section('APPROACH RANKING (IN-SAMPLE)',
