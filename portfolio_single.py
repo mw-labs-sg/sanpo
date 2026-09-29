@@ -24,15 +24,24 @@ def _clean_benchmarks(raw):
     return out[:MAX_BENCHMARKS]
 
 
-def _fetch_failure(symbols, fetch_days, what):
+def _fetch_failure(symbols, fetch_days, what, min_hist_days=0):
     """Explain a failed run instead of shrugging. A big basket usually fails for
     one of three reasons: Yahoo refused some symbols, the symbols barely overlap,
     or they overlap but no lookback window fits inside that overlap."""
-    notes = fetch_notes(symbols, fetch_days)
+    notes = fetch_notes(symbols, fetch_days, min_hist_days)
     if not notes:
         st.warning(f'Need ≥2 assets with sufficient history for {what}')
         return
     ok, bad = notes['n_ok'], notes['no_data']
+    if ok < 2 and len(notes['too_new']) > notes['n_requested'] - 2:
+        st.warning(f"Min Hist excluded {len(notes['too_new'])} of {notes['n_requested']} symbols "
+                   f"(nothing listed before {notes['cutoff'].date()}). Lower Min Hist Y, or raise Period "
+                   f"— a symbol cannot show more history than the Period fetches.")
+        return
+    if notes['too_new']:
+        st.caption(f"Min Hist excluded {len(notes['too_new'])} symbol(s) listed after "
+                   f"{notes['cutoff'].date()}: {', '.join(notes['too_new'][:15])}"
+                   + (f" and {len(notes['too_new']) - 15} more" if len(notes['too_new']) > 15 else ''))
     if ok < 2:
         msg = f"Only {ok} of {notes['n_requested']} symbols returned usable history."
         if bad:
@@ -45,19 +54,24 @@ def _fetch_failure(symbols, fetch_days, what):
     elif notes['common_rows'] < 50:
         lim = ', '.join(f"{sym} ({d.date()})" for sym, d in notes['limiters'])
         st.warning(f"{ok} symbols fetched, but they only overlap for {notes['common_rows']} trading days. "
-                   f"Latest listings: {lim}. Drop those and the shared history gets longer.")
+                   f"Latest listings: {lim}. Set Min Hist Y to exclude them automatically, or drop them by hand.")
     else:
         span = f"{notes['start'].date()} to {notes['end'].date()}" if notes['start'] is not None else 'the shared window'
         lim = ', '.join(f"{sym} ({d.date()})" for sym, d in notes['limiters'])
         st.warning(f"{ok} symbols share only {notes['common_rows']} trading days ({span}), which is too short for "
-                   f"any lookback in this mode. Latest listings: {lim} — drop them, or use a shorter lookback.")
+                   f"any lookback in this mode. Latest listings: {lim} — set Min Hist Y to exclude symbols that "
+                   f"new, or use a shorter lookback.")
 
 
-def _note_window(symbols, fetch_days):
+def _note_window(symbols, fetch_days, min_hist_days=0):
     """A couple of recent IPOs can quietly cut a 5-year request down to 2 years,
     taking the longer lookbacks with them. Say so rather than let it pass."""
-    notes = fetch_notes(symbols, fetch_days)
+    notes = fetch_notes(symbols, fetch_days, min_hist_days)
     if not notes or not notes['limiters'] or notes['start'] is None: return
+    if notes['too_new']:
+        st.caption(f"ⓘ Min Hist excluded {len(notes['too_new'])} symbol(s) listed after "
+                   f"{notes['cutoff'].date()}: {', '.join(notes['too_new'][:15])}"
+                   + (f" and {len(notes['too_new']) - 15} more" if len(notes['too_new']) > 15 else ''))
     if notes['common_rows'] >= notes['union_rows'] * 0.9: return
     lim = ', '.join(f"{sym} ({d.date()})" for sym, d in notes['limiters'][:2])
     lost = notes['union_rows'] - notes['common_rows']
@@ -135,7 +149,7 @@ def render_single_tab(is_mobile):
     _dis = not (is_mc or is_fs)
 
     # Row 1: Objective, Rebalance, Period, Direction, Sims
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c13, c4, c5 = st.columns(6)
     with c1:
         st.markdown(_fld('OBJECTIVE', 'The number the optimiser tries to maximise when it picks weights: Win Rate = share of up days, Sharpe = return per unit of volatility, Sortino = return per unit of downside volatility, MAR = return per unit of average drawdown, R² = how straight the equity curve is, Total Return = raw growth.'), unsafe_allow_html=True)
         score = st.selectbox("Objective", ['Win Rate', 'Composite', 'Sharpe', 'Sortino', 'MAR', 'R²', 'Total Return'],
@@ -148,6 +162,15 @@ def render_single_tab(is_mobile):
         st.markdown(_fld('PERIOD', 'How much price history to pull. Longer means more data to learn from and a longer backtest, but it also drags in older market regimes.'), unsafe_allow_html=True)
         period_label = st.selectbox("Period", list(PERIOD_OPTIONS.keys()),
                                      index=2, key='port_period', label_visibility='collapsed')
+    with c13:
+        st.markdown(_fld('MIN HIST Y', 'Leave out symbols that have not been listed this long, in years. A single '
+                                       'recent IPO drags the whole basket down to its own listing date, because every '
+                                       'asset has to have a price on every day of the backtest -- set 2 and anything '
+                                       'listed under 2 years ago is excluded, and the rest keep their longer shared '
+                                       'history. The run tells you which symbols it dropped. Blank = keep them all.'),
+                    unsafe_allow_html=True)
+        min_hist_str = st.text_input("Min Hist", key='port_minhist', label_visibility='collapsed',
+                                      placeholder='e.g. 2')
     with c4:
         st.markdown(_fld('DIRECTION', 'Long Only: every weight is 0 or positive. Long/Short: negative weights are allowed, so the portfolio can short (note that Min Wt % is ignored in this mode).'), unsafe_allow_html=True)
         direction = st.selectbox("Direction", ['Long Only', 'Long/Short'],
@@ -159,6 +182,7 @@ def render_single_tab(is_mobile):
         sims_str = st.text_input("Sims", key='port_sims', label_visibility='collapsed', disabled=_dis)
 
     # Row 2: Max Wt, Min Wt, Max Vol, Min Ret, Cost
+    if 'port_minhist' not in st.session_state: st.session_state['port_minhist'] = ''
     _defaults2 = {'port_maxwt': '50', 'port_minwt': '0', 'port_cost': '0.10',
                    'port_maxvol': '', 'port_minret': '', 'port_minpos': '', 'port_round': ''}
     for k, v in _defaults2.items():
@@ -240,16 +264,18 @@ def render_single_tab(is_mobile):
         symbols = list(dict.fromkeys(symbols))
 
         bench = _clean_benchmarks(bench_input)
+        try: min_hist_days = int(max(0, min(20, float(min_hist_str))) * 365) if min_hist_str.strip() else 0
+        except (ValueError, TypeError): min_hist_days = 0
         if is_mc:
             _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
                     direction, sims_str, max_wt_str, min_wt_str, max_vol_str, min_ret_str,
-                    txn_cost, bench, min_pos_str, round_str)
+                    txn_cost, bench, min_pos_str, round_str, min_hist_days)
         elif is_fs:
             _run_fs(symbols, score, rebal_label, rebal, period_label, fetch_days,
                     direction, sims_str, max_wt_str, min_wt_str, max_vol_str, min_ret_str,
-                    txn_cost, bench, min_pos_str, round_str)
+                    txn_cost, bench, min_pos_str, round_str, min_hist_days)
         else:
-            _run_ew(symbols, rebal, fetch_days, txn_cost, rebal_label, period_label, bench)
+            _run_ew(symbols, rebal, fetch_days, txn_cost, rebal_label, period_label, bench, min_hist_days)
 
     # Display results
     if is_mc:
@@ -266,7 +292,7 @@ def render_single_tab(is_mobile):
 
 def _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
             direction, sims_str, max_wt_str, min_wt_str, max_vol_str, min_ret_str,
-            txn_cost, benchmark=(), min_pos_str='', round_str=''):
+            txn_cost, benchmark=(), min_pos_str='', round_str='', min_hist_days=0):
     try: max_wt = max(10, min(100, float(max_wt_str))) / 100.0
     except (ValueError, TypeError): max_wt = 0.50
     try: min_wt = max(0, min(50, float(min_wt_str))) / 100.0
@@ -294,16 +320,17 @@ def _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
                                  txn_cost=txn_cost, allow_short=allow_short,
                                  progress_bar=progress,
                                  max_vol=max_vol, min_ann_ret=min_ann_ret,
-                                 benchmarks=benchmark, min_pos=min_pos, round_step=round_step)
+                                 benchmarks=benchmark, min_pos=min_pos, round_step=round_step,
+                                 min_history_days=min_hist_days)
     progress.empty()
 
     if not grid or not grid['results']:
-        _fetch_failure(symbols, fetch_days, 'walk-forward')
+        _fetch_failure(symbols, fetch_days, 'walk-forward', min_hist_days)
         fetch_symbol_history.clear()  # don't serve the failure from cache for 30 min
         return
     _warn_failed(grid.get('bench_failed'))
 
-    _note_window(symbols, fetch_days)
+    _note_window(symbols, fetch_days, min_hist_days)
     st.session_state.port_grid = grid
     preset_name = st.session_state.get('port_preset_name', 'Custom')
     if preset_name == 'Custom' or not preset_name:
@@ -319,6 +346,7 @@ def _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
         'direction': 'L/S' if allow_short else 'Long',
         'min_wt': min_wt, 'max_wt': max_wt, 'n_sims': n_sims, 'txn_cost': txn_cost,
         'max_vol': max_vol, 'min_ann_ret': min_ann_ret, 'min_pos': min_pos, 'round_step': round_step,
+        'min_hist_days': min_hist_days,
         'preset_name': preset_name,
     }
     if 'port_view_approach' in st.session_state:
@@ -338,6 +366,7 @@ def _display_mc(is_mobile, _lbl):
     if params.get('min_ann_ret'): constraints_str += f" · min ret {params['min_ann_ret']*100:.0f}%"
     if params.get('min_pos'): constraints_str += f" · drop <{params['min_pos']*100:g}%"
     if params.get('round_step'): constraints_str += f" · round to {params['round_step']*100:g}%"
+    if params.get('min_hist_days'): constraints_str += f" · min hist {params['min_hist_days']/365:g}y"
     bench_syms = grid.get('bench_symbols') or []
     if bench_syms: constraints_str += f" · vs {', '.join(bench_syms)}"
     _section('APPROACH RANKING',
@@ -394,7 +423,7 @@ def _display_mc(is_mobile, _lbl):
 
 def _run_fs(symbols, score, rebal_label, rebal, period_label, fetch_days,
             direction, sims_str, max_wt_str, min_wt_str, max_vol_str, min_ret_str,
-            txn_cost, benchmark=(), min_pos_str='', round_str=''):
+            txn_cost, benchmark=(), min_pos_str='', round_str='', min_hist_days=0):
     try: max_wt = max(10, min(100, float(max_wt_str))) / 100.0
     except (ValueError, TypeError): max_wt = 0.50
     try: min_wt = max(0, min(50, float(min_wt_str))) / 100.0
@@ -422,16 +451,16 @@ def _run_fs(symbols, score, rebal_label, rebal, period_label, fetch_days,
                           progress_bar=progress,
                           max_vol=max_vol, min_ann_ret=min_ann_ret,
                           rebal_months=rebal, benchmarks=benchmark, min_pos=min_pos,
-                          round_step=round_step)
+                          round_step=round_step, min_history_days=min_hist_days)
     progress.empty()
 
     if not grid or not grid['results']:
-        _fetch_failure(symbols, fetch_days, 'full-sample optimization')
+        _fetch_failure(symbols, fetch_days, 'full-sample optimization', min_hist_days)
         fetch_symbol_history.clear()
         return
     _warn_failed(grid.get('bench_failed'))
 
-    _note_window(symbols, fetch_days)
+    _note_window(symbols, fetch_days, min_hist_days)
     st.session_state.port_fs_result = grid
     preset_name = st.session_state.get('port_preset_name', 'Custom')
     if preset_name == 'Custom' or not preset_name:
@@ -447,6 +476,7 @@ def _run_fs(symbols, score, rebal_label, rebal, period_label, fetch_days,
         'direction': 'L/S' if allow_short else 'Long',
         'min_wt': min_wt, 'max_wt': max_wt, 'n_sims': n_sims, 'txn_cost': txn_cost,
         'max_vol': max_vol, 'min_ann_ret': min_ann_ret, 'min_pos': min_pos, 'round_step': round_step,
+        'min_hist_days': min_hist_days,
         'preset_name': preset_name,
     }
     if 'port_fs_view_approach' in st.session_state:
@@ -466,6 +496,7 @@ def _display_fs(is_mobile, _lbl):
     if params.get('min_ann_ret'): constraints_str += f" · min ret {params['min_ann_ret']*100:.0f}%"
     if params.get('min_pos'): constraints_str += f" · drop <{params['min_pos']*100:g}%"
     if params.get('round_step'): constraints_str += f" · round to {params['round_step']*100:g}%"
+    if params.get('min_hist_days'): constraints_str += f" · min hist {params['min_hist_days']/365:g}y"
     bench_syms = grid.get('bench_symbols') or []
     if bench_syms: constraints_str += f" · vs {', '.join(bench_syms)}"
     _section('APPROACH RANKING (IN-SAMPLE)',
@@ -520,11 +551,12 @@ def _display_fs(is_mobile, _lbl):
 # EW RUN + DISPLAY
 # =============================================================================
 
-def _run_ew(symbols, rebal_months, fetch_days, txn_cost, rebal_label, period_label, benchmark=()):
+def _run_ew(symbols, rebal_months, fetch_days, txn_cost, rebal_label, period_label, benchmark=(),
+            min_hist_days=0):
     """Compute equal-weight returns with rebalancing + txn costs."""
-    data, valid = fetch_symbol_history(tuple(symbols), days=fetch_days)
+    data, valid = fetch_symbol_history(tuple(symbols), days=fetch_days, min_history_days=min_hist_days)
     if data is None or len(valid) < 2:
-        _fetch_failure(symbols, fetch_days, 'an equal-weight backtest')
+        _fetch_failure(symbols, fetch_days, 'an equal-weight backtest', min_hist_days)
         fetch_symbol_history.clear()
         return
 
@@ -567,7 +599,7 @@ def _run_ew(symbols, rebal_months, fetch_days, txn_cost, rebal_label, period_lab
     bench, bench_failed = benchmark_series(benchmark, fetch_days, data.index)
     _warn_failed(bench_failed)
 
-    _note_window(symbols, fetch_days)
+    _note_window(symbols, fetch_days, min_hist_days)
     st.session_state.port_ew_result = {
         'ew_returns': ew_series, 'metrics': metrics, 'symbols': valid,
         'rebal_label': rebal_label, 'period_label': period_label,

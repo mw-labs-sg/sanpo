@@ -79,17 +79,18 @@ SCORE_TO_RANK = {
 _FETCH_NOTES = {}
 
 
-def fetch_notes(symbols, days):
-    return _FETCH_NOTES.get((tuple(symbols), days))
+def fetch_notes(symbols, days, min_history_days=0):
+    return _FETCH_NOTES.get((tuple(symbols), days, min_history_days))
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def fetch_symbol_history(symbols_tuple, days=1800):
+def fetch_symbol_history(symbols_tuple, days=1800, min_history_days=0):
     symbols = list(symbols_tuple)
     if not symbols: return None, []
     note = {'n_requested': len(symbols), 'no_data': [], 'n_ok': 0,
-            'union_rows': 0, 'common_rows': 0, 'start': None, 'end': None, 'limiters': []}
-    _FETCH_NOTES[(tuple(symbols_tuple), days)] = note
+            'union_rows': 0, 'common_rows': 0, 'start': None, 'end': None, 'limiters': [],
+            'too_new': [], 'cutoff': None}
+    _FETCH_NOTES[(tuple(symbols_tuple), days, min_history_days)] = note
     start = (datetime.now() - pd.Timedelta(days=days)).strftime('%Y-%m-%d')
     cols = {}; valid = []
     for sym in symbols:
@@ -106,9 +107,18 @@ def fetch_symbol_history(symbols_tuple, days=1800):
         except Exception as e:
             note['no_data'].append(sym)
             logger.warning(f"[{sym}] portfolio fetch error: {e}")
+    # Drop the newly listed before the inner join: one 2026 IPO in a basket of
+    # 150 otherwise drags everyone down to its own listing date.
+    if min_history_days and valid:
+        cutoff = pd.Timestamp.now().normalize() - pd.Timedelta(days=min_history_days)
+        note['cutoff'] = cutoff
+        kept = []
+        for sym in valid:
+            (kept if cols[sym].index[0] <= cutoff else note['too_new']).append(sym)
+        valid = kept
     note['n_ok'] = len(valid)
     if len(valid) < 2: return None, valid
-    data = pd.concat(cols, axis=1)[valid].ffill()
+    data = pd.concat({s: cols[s] for s in valid}, axis=1)[valid].ffill()
     note['union_rows'] = len(data)
     # Whoever listed last sets the common start date -- name them, they are the
     # reason a 5-year request can come back as 2 years of overlap.
@@ -459,8 +469,9 @@ def _calc_oos_metrics(returns_series):
 def run_walkforward_grid(symbols, score_type='Win Rate', rebal_months=3, n_portfolios=10000,
                          fetch_days=1800, max_weight=0.50, min_weight=0.0,
                          txn_cost=0.001, allow_short=False, progress_bar=None,
-                         max_vol=None, min_ann_ret=None, benchmarks=None, min_pos=0.0, round_step=0.0):
-    data, valid = fetch_symbol_history(tuple(symbols), days=fetch_days)
+                         max_vol=None, min_ann_ret=None, benchmarks=None, min_pos=0.0, round_step=0.0,
+                         min_history_days=0):
+    data, valid = fetch_symbol_history(tuple(symbols), days=fetch_days, min_history_days=min_history_days)
     if data is None or len(valid) < 2: return None
     returns = data.pct_change().dropna(); n_assets = len(valid)
 
@@ -536,11 +547,11 @@ def run_fullsample(symbols, score_type='Win Rate', n_portfolios=10000,
                    fetch_days=1800, max_weight=0.50, min_weight=0.0,
                    txn_cost=0.001, allow_short=False, progress_bar=None,
                    max_vol=None, min_ann_ret=None, rebal_months=3, benchmarks=None, min_pos=0.0,
-                   round_step=0.0):
+                   round_step=0.0, min_history_days=0):
     """Run MC optimization on full dataset — no walk-forward split.
     Tests all PORTFOLIO_APPROACHES lookback windows that fit in the data,
     returns weights + in-sample backtest for each."""
-    data, valid = fetch_symbol_history(tuple(symbols), days=fetch_days)
+    data, valid = fetch_symbol_history(tuple(symbols), days=fetch_days, min_history_days=min_history_days)
     if data is None or len(valid) < 2: return None
     returns = data.pct_change().dropna(); n_assets = len(valid)
 
