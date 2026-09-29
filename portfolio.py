@@ -73,12 +73,25 @@ SCORE_TO_RANK = {
 # DATA FETCHING
 # =============================================================================
 
+# Why the last fetch came back the way it did, keyed the same as the cache so a
+# cache hit still matches. Lets the UI name the symbol that truncated the window
+# instead of shrugging with "not enough history".
+_FETCH_NOTES = {}
+
+
+def fetch_notes(symbols, days):
+    return _FETCH_NOTES.get((tuple(symbols), days))
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_symbol_history(symbols_tuple, days=1800):
     symbols = list(symbols_tuple)
     if not symbols: return None, []
+    note = {'n_requested': len(symbols), 'no_data': [], 'n_ok': 0,
+            'union_rows': 0, 'common_rows': 0, 'start': None, 'end': None, 'limiters': []}
+    _FETCH_NOTES[(tuple(symbols_tuple), days)] = note
     start = (datetime.now() - pd.Timedelta(days=days)).strftime('%Y-%m-%d')
-    data = pd.DataFrame(); valid = []
+    cols = {}; valid = []
     for sym in symbols:
         try:
             ticker = yf.Ticker(sym)
@@ -87,14 +100,27 @@ def fetch_symbol_history(symbols_tuple, days=1800):
                 closes = hist['Close'].copy()
                 closes.index = closes.index.tz_localize(None) if closes.index.tz else closes.index
                 closes.index = closes.index.normalize()
-                closes = closes.groupby(closes.index).last()
-                data[sym] = closes; valid.append(sym)
+                cols[sym] = closes.groupby(closes.index).last(); valid.append(sym)
+            else:
+                note['no_data'].append(sym)
         except Exception as e:
+            note['no_data'].append(sym)
             logger.warning(f"[{sym}] portfolio fetch error: {e}")
+    note['n_ok'] = len(valid)
     if len(valid) < 2: return None, valid
-    data = data[valid].ffill().dropna()
-    if len(data) < 50: return None, valid
-    return data, valid
+    data = pd.concat(cols, axis=1)[valid].ffill()
+    note['union_rows'] = len(data)
+    # Whoever listed last sets the common start date -- name them, they are the
+    # reason a 5-year request can come back as 2 years of overlap.
+    firsts = [(sym, data[sym].first_valid_index()) for sym in valid]
+    firsts = [(sym, d) for sym, d in firsts if d is not None]
+    common = data.dropna()
+    note['common_rows'] = len(common)
+    if len(common):
+        note['start'] = common.index[0]; note['end'] = common.index[-1]
+        note['limiters'] = sorted(firsts, key=lambda kv: kv[1], reverse=True)[:3]
+    if len(common) < 50: return None, valid
+    return common, valid
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_benchmark_history(symbol, days=1800):

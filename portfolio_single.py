@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 from config import FUTURES_GROUPS, THEMES, SYMBOL_NAMES, FONTS, clean_symbol
 from portfolio import (C_MUTE, C_BG, C_TXT, C_TXT2, C_GOLD, BENCH_COLORS, MAX_BENCHMARKS, _tint,
                        REBAL_OPTIONS, PERIOD_OPTIONS, SCORE_TO_RANK,
-                       fetch_symbol_history, benchmark_series, _bench_metrics, _calc_oos_metrics,
+                       fetch_symbol_history, fetch_notes, benchmark_series, _bench_metrics, _calc_oos_metrics,
                        run_walkforward_grid, run_fullsample,
                        render_ranking_table,
                        render_weights_table, render_oos_chart,
@@ -22,6 +22,48 @@ def _clean_benchmarks(raw):
         sym = ''.join(c for c in part.strip().upper() if c.isalnum() or c in '.^=-:')
         if sym and sym not in out: out.append(sym)
     return out[:MAX_BENCHMARKS]
+
+
+def _fetch_failure(symbols, fetch_days, what):
+    """Explain a failed run instead of shrugging. A big basket usually fails for
+    one of three reasons: Yahoo refused some symbols, the symbols barely overlap,
+    or they overlap but no lookback window fits inside that overlap."""
+    notes = fetch_notes(symbols, fetch_days)
+    if not notes:
+        st.warning(f'Need ≥2 assets with sufficient history for {what}')
+        return
+    ok, bad = notes['n_ok'], notes['no_data']
+    if ok < 2:
+        msg = f"Only {ok} of {notes['n_requested']} symbols returned usable history."
+        if bad:
+            shown = ', '.join(bad[:15]) + (f" and {len(bad) - 15} more" if len(bad) > 15 else '')
+            msg += f" No data for: {shown}."
+        st.warning(msg)
+        if len(bad) > 5:
+            st.caption('Yahoo rate-limits large batches — that many failures usually means throttling '
+                       'rather than bad tickers. Wait a minute and run again.')
+    elif notes['common_rows'] < 50:
+        lim = ', '.join(f"{sym} ({d.date()})" for sym, d in notes['limiters'])
+        st.warning(f"{ok} symbols fetched, but they only overlap for {notes['common_rows']} trading days. "
+                   f"Latest listings: {lim}. Drop those and the shared history gets longer.")
+    else:
+        span = f"{notes['start'].date()} to {notes['end'].date()}" if notes['start'] is not None else 'the shared window'
+        lim = ', '.join(f"{sym} ({d.date()})" for sym, d in notes['limiters'])
+        st.warning(f"{ok} symbols share only {notes['common_rows']} trading days ({span}), which is too short for "
+                   f"any lookback in this mode. Latest listings: {lim} — drop them, or use a shorter lookback.")
+
+
+def _note_window(symbols, fetch_days):
+    """A couple of recent IPOs can quietly cut a 5-year request down to 2 years,
+    taking the longer lookbacks with them. Say so rather than let it pass."""
+    notes = fetch_notes(symbols, fetch_days)
+    if not notes or not notes['limiters'] or notes['start'] is None: return
+    if notes['common_rows'] >= notes['union_rows'] * 0.9: return
+    lim = ', '.join(f"{sym} ({d.date()})" for sym, d in notes['limiters'][:2])
+    lost = notes['union_rows'] - notes['common_rows']
+    st.caption(f"ⓘ Shared history starts {notes['start'].date()} — {notes['common_rows']} of "
+               f"{notes['union_rows']} trading days, {lost} lost to the latest listings ({lim}). "
+               f"Backtests and the longer lookbacks only see the shared window.")
 
 
 def _warn_failed(failed):
@@ -256,9 +298,12 @@ def _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
     progress.empty()
 
     if not grid or not grid['results']:
-        st.warning('Need ≥2 assets with sufficient history for walk-forward'); return
+        _fetch_failure(symbols, fetch_days, 'walk-forward')
+        fetch_symbol_history.clear()  # don't serve the failure from cache for 30 min
+        return
     _warn_failed(grid.get('bench_failed'))
 
+    _note_window(symbols, fetch_days)
     st.session_state.port_grid = grid
     preset_name = st.session_state.get('port_preset_name', 'Custom')
     if preset_name == 'Custom' or not preset_name:
@@ -381,9 +426,12 @@ def _run_fs(symbols, score, rebal_label, rebal, period_label, fetch_days,
     progress.empty()
 
     if not grid or not grid['results']:
-        st.warning('Need ≥2 assets with sufficient history for full-sample optimization'); return
+        _fetch_failure(symbols, fetch_days, 'full-sample optimization')
+        fetch_symbol_history.clear()
+        return
     _warn_failed(grid.get('bench_failed'))
 
+    _note_window(symbols, fetch_days)
     st.session_state.port_fs_result = grid
     preset_name = st.session_state.get('port_preset_name', 'Custom')
     if preset_name == 'Custom' or not preset_name:
@@ -476,7 +524,9 @@ def _run_ew(symbols, rebal_months, fetch_days, txn_cost, rebal_label, period_lab
     """Compute equal-weight returns with rebalancing + txn costs."""
     data, valid = fetch_symbol_history(tuple(symbols), days=fetch_days)
     if data is None or len(valid) < 2:
-        st.warning('Need ≥2 assets with data'); return
+        _fetch_failure(symbols, fetch_days, 'an equal-weight backtest')
+        fetch_symbol_history.clear()
+        return
 
     returns = data.pct_change().dropna()
     n_assets = len(valid)
@@ -517,6 +567,7 @@ def _run_ew(symbols, rebal_months, fetch_days, txn_cost, rebal_label, period_lab
     bench, bench_failed = benchmark_series(benchmark, fetch_days, data.index)
     _warn_failed(bench_failed)
 
+    _note_window(symbols, fetch_days)
     st.session_state.port_ew_result = {
         'ew_returns': ew_series, 'metrics': metrics, 'symbols': valid,
         'rebal_label': rebal_label, 'period_label': period_label,
