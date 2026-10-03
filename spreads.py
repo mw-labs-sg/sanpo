@@ -21,19 +21,96 @@ def _spread_sharpe(returns, ann_factor=252):
     return float((returns.mean() / returns.std()) * np.sqrt(ann_factor))
 
 def _spread_sortino(returns, ann_factor=252):
+    """Downside deviation is the RMS of min(r, 0) over EVERY bar.
+
+    Averaging the squares over the losing bars alone divides by the count of
+    losers instead of the count of bars, inflating the denominator by
+    sqrt(n / n_losers) and understating Sortino by about 44% on these series.
+    The zeros are part of the measure: a spread that loses rarely is supposed to
+    score better for it.
+    """
     if returns.std() == 0 or len(returns) < 5: return 0.0
-    ann_ret = returns.mean() * ann_factor
-    down = returns[returns < 0]
-    down_std = np.sqrt(np.mean(down**2)) * np.sqrt(ann_factor) if len(down) > 0 else 0
-    return float(ann_ret / down_std) if down_std else 0.0
+    ds = float(np.sqrt(np.mean(np.minimum(returns, 0) ** 2)) * np.sqrt(ann_factor))
+    return float(returns.mean() * ann_factor / ds) if ds else 0.0
+
+def _spread_curve(returns):
+    """Equity curve anchored at its true origin.
+
+    (1 + r).cumprod() starts at 1 + r[0], i.e. one bar in, because r came from a
+    pct_change().dropna() that already ate the first observation. That makes the
+    first bar its own running maximum, so an opening loss can never register: a
+    series that gapped 5% down on bar one and drifted up thereafter reported a
+    maximum drawdown of 0.00%. Prepending 1.0 restores bar zero.
+    """
+    return np.r_[1.0, (1 + np.asarray(returns, dtype=float)).cumprod()]
 
 def _spread_drawdowns(returns):
-    cum = (1 + returns).cumprod()
+    cum = pd.Series(_spread_curve(returns))
     peak = cum.cummax()
     dd = (cum - peak) / peak
     mdd = float(dd.min() * 100)
     add = float(dd[dd < 0].mean() * 100) if (dd < 0).any() else 0.0
     return mdd, add
+
+def _observed(index):
+    """Mask of steps that happened during hours the window actually watched.
+
+    An intraday window is a few hours a day stitched together, so the overnight
+    gap between one session's close and the next session's open contributes its
+    whole move to ER's numerator while costing a single step of the denominator.
+    That is not efficiency, it is a gap being counted as a trend. Daily and
+    weekly bars are left alone: a weekend is not an unobserved gap in a daily
+    series, and masking there would throw away every Monday.
+    """
+    if not isinstance(index, pd.DatetimeIndex) or len(index) < 3:
+        return None
+    step = pd.Series(index[1:] - index[:-1])
+    modal = step.mode()
+    if modal.empty or modal[0] >= pd.Timedelta(days=1):
+        return None
+    keep = np.ones(len(index), bool)
+    keep[1:] = (index[1:] - index[:-1]) <= modal[0] * 2
+    return keep
+
+def _spread_er(returns):
+    """Kaufman efficiency ratio: |net move| / path length, signed.
+
+    1.0 is a straight line, 0.0 is chop that goes nowhere, negative is a clean
+    downtrend. Scale-free and purely descriptive, so it stays meaningful on
+    short windows where Sharpe -- an estimate of a forward parameter -- does not.
+
+    It IS bar-size dependent: a coarser bar traces a shorter path over the same
+    net move, so never compare raw ER across intervals, only within one.
+    """
+    if len(returns) < 5: return 0.0
+    d = np.diff(_spread_curve(returns))
+    obs = _observed(getattr(returns, 'index', None))
+    if obs is not None:
+        d = d[obs]
+    path = np.abs(d).sum()
+    if path == 0: return 0.0
+    net = d.sum()
+    er = abs(net) / path
+    return float(er if net >= 0 else -er)
+
+# A drawdown of nothing is not a denominator. Floor both ratios and cap the
+# result, or a spread that barely moved posts a MAR in the hundreds.
+MIN_DD_PCT = 0.05
+MAX_RATIO = 99.0
+
+def _spread_roa(returns, mdd):
+    """Total return over the worst hole, the way the desk sizes a trade.
+
+    Refuses to score a spread whose worst drawdown is smaller than one typical
+    bar of its own movement: it did not avoid a drawdown, it was measured too
+    coarsely to have had one.
+    """
+    if len(returns) < 5: return 0.0
+    r = np.asarray(returns, dtype=float)
+    floor = max(MIN_DD_PCT, float(np.median(np.abs(r))) * 100)
+    if abs(mdd) < floor: return 0.0
+    total = float((np.prod(1 + r) - 1) * 100)
+    return float(np.clip(total / abs(mdd), -MAX_RATIO, MAX_RATIO))
 
 def _spread_r2(returns):
     if len(returns) < 5: return 0.0
@@ -63,7 +140,62 @@ def annualization_factor(index, fallback=252.0):
     span_days = (index[-1] - index[0]).total_seconds() / 86400.0
     if span_days <= 0:
         return float(fallback)
-    return float(n / (span_days / 365.25))
+    # Clamped: a window of a few bars over a few minutes would otherwise
+    # annualise into the millions.
+    return float(np.clip(n / (span_days / 365.25), 12, 8760))
+
+# =============================================================================
+# ALIGNMENT
+# =============================================================================
+
+MIN_BARS, MIN_SYMBOLS = 20, 4
+SESSION_SHARE = 0.5     # of symbols that must really print for a date to count
+
+
+def align_frames(frames, intraday, min_bars=MIN_BARS, min_symbols=MIN_SYMBOLS):
+    """Align {symbol: close Series} by shedding COLUMNS, not rows.
+
+    Dropping rows -- ffill then dropna -- lets one sparsely listed symbol govern
+    the whole matrix: ffill cannot backfill a late listing, so dropna deletes
+    every row before it, and on intraday the intersection collapses to whichever
+    market trades the fewest hours. One 2024 IPO in a basket of thirty can cut a
+    two-year window to a few months.
+
+    Daily is the exception, and only for dates nothing traded on. Crypto prints
+    every day of the year, so a Saturday enters the union index with two real
+    prices and the rest forward-filled -- a bar on which most of the board could
+    not have been traded, contributing a zero return for every closed market and
+    a live one for BTC. Those are dropped before the ffill, so a genuine single
+    market holiday still fills from its own last price.
+
+    Returns (frame, dropped_symbols).
+    """
+    syms = [k for k, v in frames.items() if v is not None and len(v) > 0]
+    if len(syms) < 2:
+        return None, []
+    union = frames[syms[0]].index
+    for s in syms[1:]:
+        union = union.union(frames[s].index)
+    cov = {k: float(frames[k].reindex(union).notna().mean()) for k in syms}
+    order = sorted(syms, key=lambda k: cov[k])   # thinnest coverage dropped first
+    keep, dropped = list(syms), []
+    df = None
+    while True:
+        df = pd.DataFrame({k: frames[k] for k in keep})
+        if intraday:
+            df = df.dropna()
+        else:
+            df = df[df.notna().mean(axis=1) >= SESSION_SHARE].ffill().dropna()
+        if len(df) >= min_bars or len(keep) <= min_symbols:
+            break
+        victim = next((k for k in order if k in keep), None)
+        if victim is None:
+            break
+        keep.remove(victim)
+        dropped.append(victim)
+    if df is None or len(df) < 5 or len(df.columns) < 2:
+        return None, dropped
+    return df, dropped
 
 # =============================================================================
 # DATA FETCHING
@@ -111,6 +243,15 @@ def fetch_sector_spread_data(sector, lookback_days=0):
 # SPREAD COMPUTATION
 # =============================================================================
 
+# What Composite averages the ranks of. Sharpe is the risk-adjusted edge, ER
+# says whether the curve got there in a straight line, Win% whether it did it
+# often. MAR and R2 are shown but deliberately not ranked on: MAR pins to its
+# cap on short windows and contributes nothing but arbitrary tie-breaking, and
+# R2 measures almost the same thing ER does, so including both double-counts
+# straightness against risk.
+COMPOSITE_METRICS = ['Sharpe', 'ER', 'Win%']
+
+
 def compute_sector_spreads(data, ann_factor=252):
     if data is None or len(data.columns) < 2: return []
 
@@ -145,7 +286,9 @@ def compute_sector_spreads(data, ann_factor=252):
         total = float((cum_spread.iloc[-1] - 1) * 100)
         ann = float(spread_ret.mean() * ann_factor * 100)
         vol = float(spread_ret.std() * np.sqrt(ann_factor) * 100)
-        mar = float(ann / abs(add)) if add != 0 else 0.0
+        mar = float(np.clip(ann / max(abs(add), MIN_DD_PCT), -MAX_RATIO, MAX_RATIO))
+        roa = _spread_roa(spread_ret, mdd)
+        er = _spread_er(spread_ret)
         r2_val = _spread_r2(spread_ret)
         corr = float(r1.corr(r2))
         win_rate = float((spread_ret > 0).sum() / len(spread_ret) * 100) if len(spread_ret) > 0 else 50.0
@@ -158,7 +301,7 @@ def compute_sector_spreads(data, ann_factor=252):
 
         pairs.append({
             'long': s1, 'short': s2,
-            'Sharpe': sh, 'Sortino': so, 'MAR': mar, 'R²': r2_val,
+            'Sharpe': sh, 'Sortino': so, 'MAR': mar, 'ROA': roa, 'ER': er, 'R²': r2_val,
             'Tot%': total, 'Ann%': ann, 'Vol%': vol, 'MDD%': mdd, 'ADD%': add,
             'Corr': corr, 'Win%': win_rate, 'beats_long': sh > best_long_sharpe,
             'cum_long': cum1, 'cum_short': cum2, 'cum_spread': cum_sp,
@@ -166,12 +309,12 @@ def compute_sector_spreads(data, ann_factor=252):
 
     n = len(pairs)
     if n == 0: return []
-    for metric in ['Sharpe', 'Sortino', 'MAR', 'R²']:
+    for metric in COMPOSITE_METRICS:
         vals = [p[metric] for p in pairs]
         order = sorted(range(n), key=lambda i: -vals[i])
         for rank, idx in enumerate(order): pairs[idx][f'_{metric}_rank'] = rank + 1
     for p in pairs:
-        p['_score'] = np.mean([p[f'_{m}_rank'] for m in ['Sharpe', 'Sortino', 'MAR', 'R²']])
+        p['_score'] = float(np.mean([p[f'_{m}_rank'] for m in COMPOSITE_METRICS]))
     pairs.sort(key=lambda x: -x['Sharpe'])
 
     for p in pairs:
@@ -186,8 +329,10 @@ def compute_sector_spreads(data, ann_factor=252):
 
 SORT_KEYS = {
     'Composite': '_score', 'Sharpe': 'Sharpe', 'Sortino': 'Sortino',
-    'MAR': 'MAR', 'R²': 'R²', 'Total': 'Tot%', 'Win Rate': 'Win%'
+    'ROA': 'ROA', 'ER': 'ER', 'MAR': 'MAR', 'R²': 'R²',
+    'Total': 'Tot%', 'Win Rate': 'Win%'
 }
+SORT_OPTIONS = list(SORT_KEYS.keys())
 
 def sort_spread_pairs(pairs, sort_key='Composite', ascending=False):
     key = SORT_KEYS.get(sort_key, sort_key)
@@ -215,6 +360,8 @@ def render_spread_table(pairs, theme, top_n=10):
             <th style='{th}text-align:right'>SCORE</th>
             <th style='{th}text-align:right'>SHARPE</th>
             <th style='{th}text-align:right'>SORTINO</th>
+            <th style='{th}text-align:right'>ROA</th>
+            <th style='{th}text-align:right'>ER</th>
             <th style='{th}text-align:right'>MAR</th>
             <th style='{th}text-align:right'>R²</th>
             <th style='{th}text-align:right'>WIN%</th>
@@ -232,6 +379,11 @@ def render_spread_table(pairs, theme, top_n=10):
         tot_c = pos_c if p['Tot%'] >= 0 else neg_c
         tot_s = '+' if p['Tot%'] >= 0 else ''
         win_c = pos_c if p['Win%'] >= 55 else (neg_c if p['Win%'] < 45 else _txt2)
+        # ER above 0.3 is a genuinely directional curve; under 0.1 is chop.
+        _er = p.get('ER', 0)
+        er_c = pos_c if _er >= 0.30 else (_mut if _er < 0.10 else _txt2)
+        _roa = p.get('ROA', 0)
+        roa_c = pos_c if _roa >= 3 else (_mut if _roa <= 0 else _txt2)
         vs = f"<span style='color:{pos_c};font-weight:700'>▲</span>" if p['beats_long'] else f"<span style='color:{_mut}'>—</span>"
         bg = f'linear-gradient(90deg,{pos_c}08,{_bg3},{pos_c}08)' if p['beats_long'] else 'transparent'
         score = p.get('_score', 0)
@@ -243,6 +395,8 @@ def render_spread_table(pairs, theme, top_n=10):
             <td style='{td}text-align:right;color:{sc_c};font-weight:600'>{score:.1f}</td>
             <td style='{td}text-align:right'><span style='color:{sh_c};font-weight:700'>{p["Sharpe"]:.2f}</span></td>
             <td style='{td}text-align:right;color:{_txt2}'>{p["Sortino"]:.2f}</td>
+            <td style='{td}text-align:right;color:{roa_c}'>{p.get("ROA", 0):.1f}</td>
+            <td style='{td}text-align:right;color:{er_c}'>{p.get("ER", 0):.2f}</td>
             <td style='{td}text-align:right;color:{_txt2}'>{p["MAR"]:.2f}</td>
             <td style='{td}text-align:right;color:{_txt2}'>{p["R²"]:.3f}</td>
             <td style='{td}text-align:right'><span style='color:{win_c};font-weight:600'>{p["Win%"]:.0f}%</span></td>

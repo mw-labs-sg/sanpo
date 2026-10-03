@@ -5,8 +5,9 @@ from datetime import datetime
 import logging
 
 from config import FUTURES_GROUPS, THEMES, SYMBOL_NAMES, FONTS, clean_symbol
-from spreads import (compute_sector_spreads, sort_spread_pairs,
-                     render_spread_table, render_spread_charts, annualization_factor)
+from spreads import (compute_sector_spreads, sort_spread_pairs, SORT_OPTIONS,
+                     render_spread_table, render_spread_charts, annualization_factor,
+                     align_frames)
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +81,7 @@ def _fetch_interval_data(symbols, interval_key, lookback_days):
             cal_days = min(cal_days, cfg['max_cal_days'])
         start = (datetime.now() - pd.Timedelta(days=max(cal_days, 2))).strftime('%Y-%m-%d')
 
-    data = pd.DataFrame()
+    frames = {}
     for sym in symbols:
         try:
             hist = yf.Ticker(sym).history(start=start, interval=cfg['yf'])
@@ -94,13 +95,16 @@ def _fetch_interval_data(symbols, interval_key, lookback_days):
             if interval_key in ('1d', '1wk'):
                 closes.index = closes.index.normalize()
                 closes = closes.groupby(closes.index).last()
-            data[sym] = closes
+            frames[sym] = closes
         except Exception as e:
             logger.debug(f"[{sym}] fetch error ({interval_key}): {e}")
 
-    if data.empty or len(data.columns) < 2:
+    # Shed thin columns rather than rows: one late listing used to delete every
+    # bar before it, and on intraday the intersection collapsed to whichever
+    # market trades the fewest hours.
+    data, thin = align_frames(frames, intraday=interval_key in ('15m', '1h', '4h'))
+    if data is None or len(data.columns) < 2:
         return None, fallback_af
-    data = data.ffill().dropna()
 
     # Measure the real bar rate off the full fetch, before slicing. The config
     # constants assume a 6.5h equity session, which made 'Lookback 30 Days' mean
@@ -209,11 +213,12 @@ def render_sector_tab(is_mobile):
         lookback_days = LOOKBACK_OPTIONS[lookback_label]
 
     with col_sort:
-        sort_options = ['Composite', 'Sharpe', 'Sortino', 'MAR', 'R²', 'Total', 'Win Rate']
-        sort_key = st.selectbox("Sort by", sort_options, index=0,
+        sort_key = st.selectbox("Sort by", SORT_OPTIONS, index=0,
             key='spread_sort_sel',
             help='Which metric ranks the pairs. Composite is the average rank across '
-                 'Sharpe, Sortino, MAR and R², so a 1.0 is best on all four.')
+                 'Sharpe, ER and Win%, so 1.0 is best on all three. ROA is total return '
+                 'over the worst drawdown; ER is how straight the curve got there '
+                 '(1.0 a straight line, 0.0 chop).')
 
     with col_dir:
         sort_dir = st.selectbox("Order", ['Desc', 'Asc'], index=0, key='spread_dir_sel')

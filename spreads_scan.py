@@ -18,11 +18,17 @@ SCAN_SORT_KEYS = {
     'Composite': ('_score', False),
     'Sharpe': ('Sharpe', True),
     'Sortino': ('Sortino', True),
+    'ROA': ('ROA', True),
+    'ER': ('ER', True),
     'MAR': ('MAR', True),
     'R²': ('R²', True),
     'Total': ('Tot%', True),
     'Win Rate': ('Win%', True),
 }
+
+# Must match spreads.COMPOSITE_METRICS -- the scan re-ranks globally across
+# groups, so it has to average the same metrics the per-sector view does.
+SCAN_COMPOSITE = ['Sharpe', 'ER', 'Win%']
 
 # =============================================================================
 # MAIN RENDER
@@ -46,11 +52,10 @@ def render_scan_tab(is_mobile):
             help='How far back to score the spreads, in trading days.')
         lookback_days = LOOKBACK_OPTIONS[lookback_label]
     with col_sort:
-        sort_options = ['Composite', 'Sharpe', 'Sortino', 'MAR', 'R²', 'Total', 'Win Rate']
-        scan_sort = st.selectbox("Sort by", sort_options, index=0,
+        scan_sort = st.selectbox("Sort by", list(SCAN_SORT_KEYS.keys()), index=0,
             key='scan_sort_sel',
             help='Which metric ranks the groups. Composite is the average rank across '
-                 'Sharpe, Sortino, MAR and R².')
+                 'Sharpe, ER and Win%.')
 
     if is_mobile:
         scan_clicked = st.button('▶  Scan All', key='spread_scan_all', type='primary')
@@ -93,6 +98,7 @@ def _run_scan_all(lookback_days, lookback_label, ann_factor, theme, scan_sort, i
                 'group': gname,
                 'long': top['long'], 'short': top['short'],
                 'Sharpe': top['Sharpe'], 'Sortino': top['Sortino'],
+                'ROA': top['ROA'], 'ER': top['ER'],
                 'MAR': top['MAR'], 'R²': top['R²'], 'Win%': top['Win%'],
                 'Tot%': top['Tot%'], 'Vol%': top['Vol%'],
                 'MDD%': top['MDD%'], 'Corr': top['Corr'],
@@ -110,13 +116,13 @@ def _run_scan_all(lookback_days, lookback_label, ann_factor, theme, scan_sort, i
     # Recompute global ranks
     n = len(all_top)
     if n > 1:
-        for metric in ['Sharpe', 'Sortino', 'MAR', 'R²']:
+        for metric in SCAN_COMPOSITE:
             vals = [p[metric] for p in all_top]
             order = sorted(range(n), key=lambda i: -vals[i])
             for rank, idx in enumerate(order):
                 all_top[idx][f'_{metric}_rank'] = rank + 1
         for p in all_top:
-            p['_score'] = np.mean([p[f'_{m}_rank'] for m in ['Sharpe', 'Sortino', 'MAR', 'R²']])
+            p['_score'] = float(np.mean([p[f'_{m}_rank'] for m in SCAN_COMPOSITE]))
     else:
         all_top[0]['_score'] = 1.0
 
@@ -156,6 +162,8 @@ def _render_scan_table(sorted_results, theme):
             <th style='{th}text-align:right'>SCORE</th>
             <th style='{th}text-align:right'>SHARPE</th>
             <th style='{th}text-align:right'>SORTINO</th>
+            <th style='{th}text-align:right'>ROA</th>
+            <th style='{th}text-align:right'>ER</th>
             <th style='{th}text-align:right'>MAR</th>
             <th style='{th}text-align:right'>R²</th>
             <th style='{th}text-align:right'>WIN%</th>
@@ -172,6 +180,10 @@ def _render_scan_table(sorted_results, theme):
         tot_c = pos_c if p['Tot%'] >= 0 else neg_c
         tot_s = '+' if p['Tot%'] >= 0 else ''
         win_c = pos_c if p['Win%'] >= 55 else (neg_c if p['Win%'] < 45 else _txt2)
+        _er = p.get('ER', 0)
+        er_c = pos_c if _er >= 0.30 else (_mut if _er < 0.10 else _txt2)
+        _roa = p.get('ROA', 0)
+        roa_c = pos_c if _roa >= 3 else (_mut if _roa <= 0 else _txt2)
         score = p.get('_score', 0)
         sc_c = pos_c if score <= 3 else (_txt2 if score <= 6 else _mut)
         is_top3 = rank <= 3
@@ -186,6 +198,8 @@ def _render_scan_table(sorted_results, theme):
             <td style='{td}text-align:right;color:{sc_c};font-weight:600'>{score:.1f}</td>
             <td style='{td}text-align:right'><span style='color:{sh_c};font-weight:700'>{p["Sharpe"]:.2f}</span></td>
             <td style='{td}text-align:right;color:{_txt2}'>{p["Sortino"]:.2f}</td>
+            <td style='{td}text-align:right;color:{roa_c}'>{p.get("ROA", 0):.1f}</td>
+            <td style='{td}text-align:right;color:{er_c}'>{p.get("ER", 0):.2f}</td>
             <td style='{td}text-align:right;color:{_txt2}'>{p["MAR"]:.2f}</td>
             <td style='{td}text-align:right;color:{_txt2}'>{p["R²"]:.3f}</td>
             <td style='{td}text-align:right'><span style='color:{win_c};font-weight:600'>{p["Win%"]:.0f}%</span></td>
