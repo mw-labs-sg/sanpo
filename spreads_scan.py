@@ -31,7 +31,6 @@ SCAN_SORT_KEYS = {
 def render_scan_tab(is_mobile):
     theme_name = st.session_state.get('theme', 'Dark')
     theme = THEMES.get(theme_name, THEMES['Dark'])
-    _lbl = f"color:#e2e8f0;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;font-family:{FONTS}"
     _bg3 = theme.get('bg3', '#0f172a'); _mut = theme.get('muted', '#475569')
     ann_factor = 252
 
@@ -42,21 +41,23 @@ def render_scan_tab(is_mobile):
         col_lb, col_sort, col_btn = st.columns([3, 3, 2])
 
     with col_lb:
-        st.markdown(f"<div style='{_lbl}'>LOOKBACK</div>", unsafe_allow_html=True)
         lookback_label = st.selectbox("Lookback", list(LOOKBACK_OPTIONS.keys()), index=0,
-            key='scan_lookback_sel', label_visibility='collapsed')
+            key='scan_lookback_sel',
+            help='How far back to score the spreads, in trading days.')
         lookback_days = LOOKBACK_OPTIONS[lookback_label]
     with col_sort:
-        st.markdown(f"<div style='{_lbl}'>SORT BY</div>", unsafe_allow_html=True)
         sort_options = ['Composite', 'Sharpe', 'Sortino', 'MAR', 'R²', 'Total', 'Win Rate']
-        scan_sort = st.selectbox("Sort", sort_options, index=0,
-            key='scan_sort_sel', label_visibility='collapsed')
+        scan_sort = st.selectbox("Sort by", sort_options, index=0,
+            key='scan_sort_sel',
+            help='Which metric ranks the groups. Composite is the average rank across '
+                 'Sharpe, Sortino, MAR and R².')
 
     if is_mobile:
         scan_clicked = st.button('▶  Scan All', key='spread_scan_all', type='primary')
     else:
         with col_btn:
-            st.markdown(f"<div style='{_lbl}'>&nbsp;</div>", unsafe_allow_html=True)
+            # Blank label, so the button lines up with the two selectboxes.
+            st.markdown("<div style='height:22px'></div>", unsafe_allow_html=True)
             scan_clicked = st.button('▶  Scan All', key='spread_scan_all', type='primary')
 
     if scan_clicked:

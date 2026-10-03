@@ -333,6 +333,19 @@ def render_spreads_tab(is_mobile):
         .stTabs .stTabs [data-baseweb="tab-highlight"] {{
             background-color: #4ade80 !important;
         }}
+        /* Native Streamlit labels, restyled to the SANPO scale. Hand-rolled
+           markdown labels get clipped to a sliver by the tab container, which
+           left these fields effectively unlabelled. Same fix as PORTFOLIO. */
+        .stSelectbox label p, .stTextInput label p {{
+            font-size: 10px !important; font-weight: 600 !important; text-transform: uppercase;
+            letter-spacing: 0.08em; color: #cbd5e1 !important; font-family: {FONTS} !important;
+        }}
+        .stSelectbox label, .stTextInput label {{ margin-bottom: 1px !important; }}
+        div[data-baseweb="select"] span,
+        div[data-baseweb="select"] div[aria-selected] {{
+            font-family: {FONTS} !important; font-size: 13px !important; letter-spacing: 0.01em !important;
+        }}
+        .stTextInput input {{ font-family: {FONTS} !important; font-size: 13px !important; letter-spacing: 0.01em !important; }}
     </style>""", unsafe_allow_html=True)
 
     tab_sector, tab_scan = st.tabs(['Sector', 'All'])
