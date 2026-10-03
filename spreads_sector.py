@@ -6,11 +6,14 @@ import logging
 
 from config import FUTURES_GROUPS, THEMES, SYMBOL_NAMES, FONTS, clean_symbol
 from spreads import (compute_sector_spreads, sort_spread_pairs,
-                     render_spread_table, render_spread_charts)
+                     render_spread_table, render_spread_charts, annualization_factor)
 
 logger = logging.getLogger(__name__)
 
-# yf interval, resample target, bars per trading day, max calendar days yfinance allows
+# yf interval, resample target, bars per trading day, max calendar days yfinance allows.
+# bars_per_day here describes a 6.5h US equity session and is only a fallback --
+# the real rate is measured off the fetched index, because futures run ~77 15m
+# bars a day and FX ~95.
 INTERVAL_CONFIG = {
     '15m': {'yf': '15m', 'resample': None, 'bars_per_day': 26,  'max_cal_days': 59},
     '1h':  {'yf': '1h',  'resample': None, 'bars_per_day': 7,   'max_cal_days': 729},
@@ -33,6 +36,7 @@ LOOKBACK_OPTIONS = {
     '520 Days': 520,
 }
 
+# Fallback only, for when the window is too short to measure the real bar rate.
 ANN_FACTORS = {
     '15m': 26 * 252,
     '1h':  7 * 252,
@@ -61,10 +65,12 @@ def _parse_basket(raw):
 
 @st.cache_data(ttl=900, show_spinner=False)
 def _fetch_interval_data(symbols, interval_key, lookback_days):
+    """Returns (normalised prices, annualisation factor), or (None, fallback)."""
     cfg = INTERVAL_CONFIG[interval_key]
+    fallback_af = float(ANN_FACTORS[interval_key])
     symbols = list(symbols or ())
     if len(symbols) < 2:
-        return None
+        return None, fallback_af
 
     if lookback_days == 0:  # YTD
         start = datetime.now().replace(month=1, day=1).strftime('%Y-%m-%d')
@@ -93,17 +99,26 @@ def _fetch_interval_data(symbols, interval_key, lookback_days):
             logger.debug(f"[{sym}] fetch error ({interval_key}): {e}")
 
     if data.empty or len(data.columns) < 2:
-        return None
+        return None, fallback_af
     data = data.ffill().dropna()
 
+    # Measure the real bar rate off the full fetch, before slicing. The config
+    # constants assume a 6.5h equity session, which made 'Lookback 30 Days' mean
+    # about ten days on futures and FX.
+    bars_per_day = cfg['bars_per_day']
+    if interval_key in ('15m', '1h', '4h') and len(data) > 1:
+        sessions = max(data.index.normalize().nunique(), 1)
+        bars_per_day = max(len(data) / sessions, 0.1)
+    ann_factor = annualization_factor(data.index, fallback_af)
+
     if lookback_days > 0:
-        bars = max(int(lookback_days * cfg['bars_per_day']), 5)
+        bars = max(int(lookback_days * bars_per_day), 5)
         if len(data) > bars:
             data = data.iloc[-bars:]
 
     if len(data) < 5:
-        return None
-    return 100 * (data / data.iloc[0])
+        return None, ann_factor
+    return 100 * (data / data.iloc[0]), ann_factor
 
 
 def render_sector_tab(is_mobile):
@@ -180,7 +195,6 @@ def render_sector_tab(is_mobile):
             help='Bar size the spreads are measured on. Intraday intervals only reach '
                  'back so far: 15m to 60 days, 1h and 4h to 730.')
         st.session_state.spread_interval = interval_key
-        ann_factor = ANN_FACTORS[interval_key]
 
     with col_lb:
         lb_keys = list(LOOKBACK_OPTIONS.keys())
@@ -214,7 +228,7 @@ def render_sector_tab(is_mobile):
 
     # Fetch and compute
     with st.spinner(f'Computing {preset} spreads ({interval_key} · {lookback_label})...'):
-        data = _fetch_interval_data(tuple(symbols), interval_key, lookback_days)
+        data, ann_factor = _fetch_interval_data(tuple(symbols), interval_key, lookback_days)
 
     if data is None or len(data.columns) < 2:
         limits = {'15m': '60 days', '1h': '730 days', '4h': '730 days'}

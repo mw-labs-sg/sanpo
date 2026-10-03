@@ -6,7 +6,7 @@ import logging
 
 from config import FUTURES_GROUPS, THEMES, SYMBOL_NAMES, FONTS, clean_symbol
 from spreads import (LOOKBACK_OPTIONS, fetch_sector_spread_data,
-                     compute_sector_spreads)
+                     compute_sector_spreads, annualization_factor)
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +83,8 @@ def _run_scan_all(lookback_days, lookback_label, ann_factor, theme, scan_sort, i
             data = fetch_sector_spread_data(gname, lookback_days)
             if data is None or len(data.columns) < 2:
                 continue
-            pairs = compute_sector_spreads(data, ann_factor)
+            # Per group: a crypto group prints 365 bars a year, an equity one 252.
+            pairs = compute_sector_spreads(data, annualization_factor(data.index, ann_factor))
             if not pairs:
                 continue
             pairs.sort(key=lambda x: x.get('_score', 999))
@@ -211,7 +212,7 @@ def _render_scan_charts(sorted_results, lookback_days, ann_factor, theme, is_mob
             data = fetch_sector_spread_data(r['group'], lookback_days)
             if data is None or len(data.columns) < 2:
                 continue
-            pairs = compute_sector_spreads(data, ann_factor)
+            pairs = compute_sector_spreads(data, annualization_factor(data.index, ann_factor))
             if not pairs:
                 continue
             pairs.sort(key=lambda x: x.get('_score', 999))

@@ -48,6 +48,23 @@ def _spread_r2(returns):
     r2 = float(np.clip(r2, 0, 1))
     return r2 if slope > 0 else -r2
 
+
+def annualization_factor(index, fallback=252.0):
+    """Bars per year, measured off the index instead of assumed.
+
+    A flat 252 only describes daily equity bars. Crypto prints 365 days a year,
+    and one intraday session is 26 15m bars for US equities but ~77 for futures
+    and ~95 for FX, so assuming the equity session understated Sharpe, Sortino
+    and MAR on those groups by up to 1.9x.
+    """
+    n = len(index)
+    if n < 3:
+        return float(fallback)
+    span_days = (index[-1] - index[0]).total_seconds() / 86400.0
+    if span_days <= 0:
+        return float(fallback)
+    return float(n / (span_days / 365.25))
+
 # =============================================================================
 # DATA FETCHING
 # =============================================================================
@@ -111,12 +128,17 @@ def compute_sector_spreads(data, ann_factor=252):
         spread_ret = (r1 - r2).dropna()
 
         sh = _spread_sharpe(spread_ret, ann_factor)
-        so = _spread_sortino(spread_ret, ann_factor)
 
+        # A spread with negative Sharpe is the same trade the other way round, so
+        # swap the legs. Sharpe can simply be negated -- std(-r) == std(r) -- but
+        # Sortino cannot: its denominator looks only at losing bars, and flipping
+        # turns the old winners into the losers, so it has to be recomputed on the
+        # flipped series. Negating it was understating 72% of flipped pairs.
         if sh < 0:
             spread_ret = -spread_ret
-            sh, so = -sh, -so
+            sh = -sh
             s1, s2 = s2, s1
+        so = _spread_sortino(spread_ret, ann_factor)
 
         mdd, add = _spread_drawdowns(spread_ret)
         cum_spread = (1 + spread_ret).cumprod()
