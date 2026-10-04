@@ -3,6 +3,7 @@ import feedparser
 import logging
 import re
 import urllib.request
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from html import escape as html_escape, unescape as html_unescape
@@ -15,51 +16,6 @@ _UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like
 def get_theme():
     tn = st.session_state.get('theme', 'Dark')
     return THEMES.get(tn, THEMES['Dark'])
-
-NEWS_FEEDS = {
-    'Macro': [
-        ('S&P 500', 'https://news.google.com/rss/search?q=S%26P+500+index&hl=en&gl=US&ceid=US:en'),
-        ('Global Equities', 'https://news.google.com/rss/search?q=global+equities+MSCI+world&hl=en&gl=US&ceid=US:en'),
-        ('Gold', 'https://news.google.com/rss/search?q=gold+price+XAU&hl=en&gl=US&ceid=US:en'),
-        ('US T-Bills', 'https://news.google.com/rss/search?q=US+treasury+bills+fed+funds+rate&hl=en&gl=US&ceid=US:en'),
-        ('Bitcoin', 'https://news.google.com/rss/search?q=bitcoin+BTC+price&hl=en&gl=US&ceid=US:en'),
-    ],
-    'Singapore': [
-        ('SGX', 'https://news.google.com/rss/search?q=SGX+Singapore+Exchange&hl=en&gl=SG&ceid=SG:en'),
-        ('STI Index', 'https://news.google.com/rss/search?q=Straits+Times+Index+STI&hl=en&gl=SG&ceid=SG:en'),
-        ('Amova MBH', 'https://news.google.com/rss/search?q=Singapore+corporate+bonds+investment+grade+HDB+Temasek+UOB+LTA&hl=en&gl=SG&ceid=SG:en'),
-        ('SG T-Bill', 'https://news.google.com/rss/search?q=Singapore+T-bill+rate+MAS+government+securities&hl=en&gl=SG&ceid=SG:en'),
-    ],
-    'CPF': [
-        ('CPF', 'https://news.google.com/rss/search?q=CPF+Singapore+Central+Provident+Fund+interest+rate&hl=en&gl=SG&ceid=SG:en'),
-    ],
-    'Local': [
-        ('CNA', 'https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml&category=6511'),
-        ('Straits Times', 'https://www.straitstimes.com/news/business/rss.xml'),
-        ('Business Times', 'https://www.businesstimes.com.sg/rss/top-stories'),
-    ],
-    'Regional': [
-        ('SCMP', 'https://www.scmp.com/rss/5/feed'),
-        ('Nikkei Asia', 'https://asia.nikkei.com/rss/feed/nar'),
-        ('Malay Mail', 'https://www.malaymail.com/feed/rss/money'),
-        ('The Star', 'https://www.thestar.com.my/rss/Business'),
-    ],
-    'World': [
-        ('Bloomberg', 'https://feeds.bloomberg.com/markets/news.rss'),
-        ('FT', 'https://www.ft.com/rss/home'),
-        ('CNBC', 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=20910258'),
-        ('BBC Business', 'https://feeds.bbci.co.uk/news/business/rss.xml'),
-    ],
-    'Tech': [
-        ('TechCrunch AI', 'https://techcrunch.com/category/artificial-intelligence/feed/'),
-        ('The Verge', 'https://www.theverge.com/rss/index.xml'),
-        ('Ars Technica', 'https://feeds.arstechnica.com/arstechnica/technology-lab'),
-        ('CoinDesk', 'https://www.coindesk.com/arc/outboundfeeds/rss/'),
-        ('STAT News', 'https://www.statnews.com/feed/'),
-        ('Endpoints', 'https://endpts.com/feed/'),
-        ('Longevity Tech', 'https://www.longevity.technology/feed/'),
-    ],
-}
 
 # ── Intelligence layer ──────────────────────────────────────
 SOURCE_TIER = {
@@ -232,73 +188,185 @@ def backfill_missing_dates(items):
     return out
 
 
-def render_news_panel(region, feeds, max_items=20, height=600):
-    """Render a ranked news panel — scores by source tier + recency."""
-    t = get_theme(); pos_c = t['pos']
-    _body_bg = t.get('bg2', '#0f1522')
-    _bdr = t.get('border', '#1e293b')
-    _mut = t.get('muted', '#4a5568')
-    _link_c = t.get('text', '#c9d1d9')
-    _row_alt = t.get('bg3', '#131b2e')
-    _txt2 = t.get('text2', '#94a3b8')
-    _accent = pos_c
+# ── MASTHEAD BOARD ───────────────────────────────────────────────────────────
+# One box per outlet — no commingling, so each masthead gets its own slot and a
+# busy wire can never crowd out a quiet one. This used to sit on PULSE; it is
+# the news tab's job, and PULSE is for prices.
 
-    all_items = []
-    for name, url in feeds:
-        all_items.extend(fetch_rss_feed(name, url))
-    # Intelligence layer: rank by source tier + recency, deduplicate
-    all_items = score_and_rank(all_items, top_n=max_items)
-    all_items.sort(key=lambda x: x.get('sort_key', ''), reverse=True)
-    all_items = all_items[:max_items]
+BOARD_SOURCES = [
+    # (masthead, feed name, category, url) — ordered by category so the board
+    # reads in blocks. Every feed here was checked to return items; two
+    # candidates were dropped for returning nothing (Fierce Biotech, IMF Blog).
+    ('STRAITS TIMES',    'ST',             'Singapore', 'https://www.straitstimes.com/news/business/rss.xml'),
+    ('BUSINESS TIMES',   'BT',             'Singapore', 'https://www.businesstimes.com.sg/rss/top-stories'),
+    ('CNA',              'CNA',            'Singapore', 'https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml&category=6511'),
 
-    rows = ''
-    if not all_items:
-        rows = f"<div style='padding:12px;color:{_mut};font-size:10px;text-align:center'>Feeds loading…</div>"
-    else:
-        for i, item in enumerate(all_items):
-            bg = _body_bg if i % 2 == 0 else _row_alt
-            rows += (
-                "<div style='padding:4px 10px;background:" + bg + ";border-bottom:1px solid " + _bdr + "18;"
+    ('SCMP',             'SCMP',           'Regional',  'https://www.scmp.com/rss/5/feed'),
+    ('NIKKEI ASIA',      'Nikkei',         'Regional',  'https://asia.nikkei.com/rss/feed/nar'),
+    ('MALAY MAIL',       'Malay Mail',     'Regional',  'https://www.malaymail.com/feed/rss/money'),
+
+    ('BLOOMBERG',        'Bloomberg',      'World',     'https://feeds.bloomberg.com/markets/news.rss'),
+    ('FT',               'FT',             'World',     'https://www.ft.com/rss/home'),
+    # www.businessinsider.com/rss, not markets.businessinsider.com/rss/news —
+    # the markets feed is mostly syndicated press releases.
+    ('BUSINESS INSIDER', 'BI',             'World',     'https://www.businessinsider.com/rss'),
+
+    ('ECONOMIST FIN',    'Economist Fin',  'Economy',   'https://www.economist.com/finance-and-economics/rss.xml'),
+    ('ECONOMIST BIZ',    'Economist Biz',  'Economy',   'https://www.economist.com/business/rss.xml'),
+    ('CNBC ECONOMY',     'CNBC',           'Economy',   'https://www.cnbc.com/id/20910258/device/rss/rss.html'),
+
+    ('POLITICO',         'Politico',       'Politics',  'https://rss.politico.com/politics-news.xml'),
+    ('THE HILL',         'The Hill',       'Politics',  'https://thehill.com/news/feed/'),
+    ('BBC POLITICS',     'BBC Politics',   'Politics',  'https://feeds.bbci.co.uk/news/politics/rss.xml'),
+
+    ('TECHCRUNCH',       'TechCrunch',     'Tech',      'https://techcrunch.com/feed/'),
+    ('THE VERGE',        'The Verge',      'Tech',      'https://www.theverge.com/rss/index.xml'),
+    ('ARS TECHNICA',     'Ars Technica',   'Tech',      'https://feeds.arstechnica.com/arstechnica/technology-lab'),
+
+    ('TECHCRUNCH AI',    'TechCrunch AI',  'AI',        'https://techcrunch.com/category/artificial-intelligence/feed/'),
+    ('MIT TECH REVIEW',  'MIT Tech Review', 'AI',       'https://www.technologyreview.com/feed/'),
+    ('VENTUREBEAT AI',   'VentureBeat AI', 'AI',        'https://venturebeat.com/category/ai/feed/'),
+
+    ('COINDESK',         'CoinDesk',       'Crypto',    'https://www.coindesk.com/arc/outboundfeeds/rss/'),
+    ('COINTELEGRAPH',    'Cointelegraph',  'Crypto',    'https://cointelegraph.com/rss'),
+    ('THE BLOCK',        'The Block',      'Crypto',    'https://www.theblock.co/rss.xml'),
+
+    ('STAT NEWS',        'STAT',           'Health',    'https://www.statnews.com/feed/'),
+    ('ENDPOINTS',        'Endpoints',      'Health',    'https://endpts.com/feed/'),
+    ('BIOPHARMA DIVE',   'BioPharma Dive', 'Health',    'https://www.biopharmadive.com/feeds/news/'),
+]
+
+BOARD_PER_SOURCE = 5
+BOARD_COLS = 3               # 3 across: the headline gets room to be read
+_BOARD_ROW_H = 26            # measured row height, px
+_BOARD_HEAD_H = 24           # box header
+_BOARD_GAP = 6
+_BOARD_CAT_H = 30            # category heading + its margin
+
+
+def _board_surface():
+    t = get_theme()
+    is_light = t.get('mode') == 'light'
+    return {
+        'bg2': t.get('bg2', '#0a0f1a'),
+        'border': t.get('border', '#1e293b'),
+        'muted': t.get('muted', '#475569'),
+        'link': '#334155' if is_light else t.get('text', '#e2e8f0'),
+        'row_alt': '#f8fafc' if is_light else 'rgba(12,24,45,0.40)',
+        # Category headings take the theme accent, like the tab underline and
+        # the basket section headers, rather than a hardcoded teal of their own.
+        'accent': t.get('accent', '#4ade80'),
+    }
+
+
+def _by_category():
+    """Outlets grouped under their category, in the order they are listed."""
+    out = OrderedDict()
+    for heading, name, category, url in BOARD_SOURCES:
+        out.setdefault(category, []).append((heading, name, url))
+    return out
+
+
+def board_height(cols=BOARD_COLS):
+    """Exact height for the board — every row visible, no scroll.
+
+    Each category is its own block, so the total is the sum of the blocks
+    rather than one grid: a category with four outlets takes two rows on a
+    three-wide board and the next heading has to clear them.
+    """
+    box = _BOARD_HEAD_H + BOARD_PER_SOURCE * _BOARD_ROW_H
+    total = 0
+    for members in _by_category().values():
+        rows = -(-len(members) // max(1, cols))
+        total += _BOARD_CAT_H + rows * box + _BOARD_GAP * (rows - 1) + _BOARD_GAP
+    return total
+
+
+def render_news_board(cols=BOARD_COLS):
+    """A box per outlet, BOARD_PER_SOURCE headlines each, side by side.
+
+    Height is derived from the content, so nothing needs scrolling to be read.
+    """
+    s = _board_surface()
+    box_h = _BOARD_HEAD_H + BOARD_PER_SOURCE * _BOARD_ROW_H
+
+    def _rows(items):
+        out = ''
+        for i, item in enumerate(items):
+            bg = s['bg2'] if i % 2 == 0 else s['row_alt']
+            # No source label: the box header already names the outlet, so the
+            # space goes to the headline instead.
+            out += (
+                "<div style='padding:4px 10px;background:" + bg + ";border-bottom:1px solid " + s['border'] + "18;"
                 "display:flex;align-items:baseline;gap:6px;font-family:" + FONTS + ";white-space:nowrap;overflow:hidden'>"
-                "<span style='flex-shrink:0;width:115px;display:flex;gap:5px;align-items:baseline'>"
-                "<span style='color:" + _accent + ";font-weight:600;font-size:9px'>" + item['source'] + "</span>"
-                "<span style='color:" + _txt2 + ";font-size:9px'>" + item['date'] + "</span></span>"
-                "<a href='" + item['url'] + "' target='_blank' title='" + item['title'] + "' "
-                "style='color:" + _link_c + ";text-decoration:none;flex:1;min-width:0;"
-                "font-size:10.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis;"
-                "white-space:nowrap'>" + item['title'] + "</a>"
+                "<span style='flex-shrink:0;width:34px;color:" + s['muted'] + ";font-size:9px'>"
+                + item.get('date', '') + "</span>"
+                "<a href='" + item.get('url', '#') + "' target='_blank' title='" + item.get('title', '') + "' "
+                "style='color:" + s['link'] + ";text-decoration:none;flex:1;min-width:0;"
+                "font-size:10.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"
+                + item.get('title', '') + "</a>"
+                "</div>"
+            )
+        return out
+
+    sections = ''
+    rendered = 0
+    for category, members in _by_category().items():
+        boxes = ''
+        for heading, name, url in members:
+            items = fetch_rss_feed(name, url)
+            items.sort(key=lambda x: x.get('sort_key', ''), reverse=True)
+            items = items[:BOARD_PER_SOURCE]
+            # Nikkei's feed carries no dates; scrape them off the article pages.
+            # Done after the slice so it costs 5 lookups, not 20.
+            items = backfill_missing_dates(items)
+            items.sort(key=lambda x: x.get('sort_key', ''), reverse=True)
+            rendered += len(items)
+
+            body = _rows(items) if items else (
+                "<div style='padding:10px;color:" + s['muted'] + ";font-size:10px;text-align:center'>Unavailable</div>"
+            )
+            boxes += (
+                "<div style='background:" + s['bg2'] + ";border:1px solid " + s['border'] + ";border-radius:6px;"
+                "overflow:hidden;display:flex;flex-direction:column;height:" + str(box_h) + "px'>"
+                "<div style='padding:5px 10px;display:flex;justify-content:space-between;align-items:center;"
+                "border-bottom:1px solid " + s['border'] + ";flex-shrink:0'>"
+                "<span style='color:#f8fafc;font-size:9px;font-weight:600;letter-spacing:0.1em'>" + heading + "</span>"
+                "<span style='color:" + s['muted'] + ";font-size:9px;font-weight:500'>"
+                + str(len(items)) + "</span></div>"
+                "<div style='overflow-y:auto;flex:1;min-height:0'>" + body + "</div>"
                 "</div>"
             )
 
-    page = (
+        sections += (
+            "<div style='color:" + s['accent'] + ";font-size:10px;font-weight:700;"
+            "letter-spacing:0.14em;text-transform:uppercase;margin:0 0 6px 2px;"
+            "height:" + str(_BOARD_CAT_H - 6) + "px;line-height:" + str(_BOARD_CAT_H - 6) + "px'>"
+            + category + "</div>"
+            "<div style='display:grid;grid-template-columns:repeat(" + str(cols) + ",minmax(0,1fr));"
+            "gap:" + str(_BOARD_GAP) + "px;margin-bottom:" + str(_BOARD_GAP) + "px'>" + boxes + "</div>"
+        )
+
+    if not rendered:
+        return
+    st_html(
         "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-        "<style>* { margin:0; padding:0; box-sizing:border-box; }"
-        "body { background:transparent; overflow:hidden; }"
-        "::-webkit-scrollbar { width:4px; }"
-        "::-webkit-scrollbar-track { background:" + _body_bg + "; }"
-        "::-webkit-scrollbar-thumb { background:" + _bdr + ";border-radius:2px; }"
+        "<style>*{margin:0;padding:0;box-sizing:border-box}"
+        "body{background:transparent;font-family:" + FONTS + "}"
+        "::-webkit-scrollbar{width:4px;height:4px}"
+        "::-webkit-scrollbar-thumb{background:" + s['border'] + ";border-radius:2px}"
         "</style></head><body>"
-        "<div style='background:" + _body_bg + ";border:1px solid " + _bdr + ";border-radius:4px;"
-        "height:" + str(height) + "px;overflow-y:auto'>"
-        + rows +
-        "</div></body></html>"
+        "<div style='font-family:" + FONTS + "'>" + sections + "</div>"
+        "</body></html>",
+        height=board_height(cols),
     )
-    st_html(page, height=height)
+
 
 def render_news_tab(is_mobile):
-    # Left: general news tabs | Right: portfolio news tabs
-    left, right = st.columns([1, 1])
+    """The masthead board, and nothing else.
 
-    with left:
-        general_tabs = ['Local', 'Regional', 'World', 'Tech']
-        tabs = st.tabs(general_tabs)
-        for tab, region in zip(tabs, general_tabs):
-            with tab:
-                render_news_panel(region, NEWS_FEEDS[region], height=580)
-
-    with right:
-        portfolio_tabs = ['Macro', 'Singapore', 'CPF']
-        tabs = st.tabs(portfolio_tabs)
-        for tab, region in zip(tabs, portfolio_tabs):
-            with tab:
-                render_news_panel(region, NEWS_FEEDS[region], height=580)
+    The category panels that used to sit underneath showed the same wires a
+    second time, split by desk; the board already names each outlet's desk in
+    its header.
+    """
+    render_news_board(cols=1 if is_mobile else BOARD_COLS)

@@ -90,6 +90,12 @@ HEATMAP_SECTORS = OrderedDict([
     ('Shipping',   ['ZIM', 'SBLK', 'STNG', 'FRO']),
     ('Strategy',   ['MSTR', 'MSTU', 'MSTY', 'MSTX']),
     ('Singapore',  ['^STI', 'ES3.SI', 'S68.SI', 'MBH.SI']),
+    # The four themes the BASKETS tab is organised around. Macro was already
+    # covered by the rows above; these three were not represented at all, so a
+    # PULSE glance missed the AI and healthcare tape entirely.
+    ('AI',         ['NVDA', 'AVGO', 'AMD', 'TSM']),
+    ('Healthcare', ['VRTX', 'REGN', 'AMGN', 'MRNA']),
+    ('Blockchain', ['COIN', 'MSTR', 'CRCL', 'HOOD']),
 ])
 
 # Same set as the hero cards: the sparkline lives inside the card now.
@@ -129,7 +135,21 @@ def _fetch_pulse_batch():
             current = float(hist['Close'].iloc[-1])
             prev_close = float(hist['Close'].iloc[-2]) if len(hist) >= 2 else current
             change = ((current - prev_close) / prev_close) * 100 if prev_close else 0
-            result[sym] = {'price': current, 'change': round(change, 2)}
+            # Is it trading outside the PREVIOUS session's range? A big move
+            # inside yesterday's range is noise; the same move through the high
+            # is a day breakout, and that is what the arrow marks.
+            out = ''
+            if len(hist) >= 2:
+                try:
+                    p_hi = float(hist['High'].iloc[-2])
+                    p_lo = float(hist['Low'].iloc[-2])
+                    if current > p_hi:
+                        out = 'above'
+                    elif current < p_lo:
+                        out = 'below'
+                except (KeyError, ValueError, TypeError):
+                    pass
+            result[sym] = {'price': current, 'change': round(change, 2), 'out': out}
         except Exception as e:
             logger.debug(f"[{sym}] pulse fetch error: {e}")
     return result
@@ -415,7 +435,7 @@ def _render_market_status_bar():
     _wrap(html, 28)
 
 
-def _render_hero_row(data, spark_data=None):
+def _render_hero_row(data, spark_data=None, is_mobile=False):
     """Headline market cards: price, today's move, and a 30-session line.
 
     The sparkline used to be a second row repeating six of these same symbols
@@ -454,7 +474,7 @@ def _render_hero_row(data, spark_data=None):
         spark_block = f"<div style='margin-top:5px;height:22px'>{spark}</div>"
 
         cards += (
-            f"<div style='flex:1;min-width:118px;padding:9px 11px 8px 11px;"
+            f"<div style='padding:9px 11px 8px 11px;"
             f"{card_bg}"
             f"border:1px solid {s['border']};border-radius:6px;position:relative;overflow:hidden'>"
             f"<div style='position:absolute;top:0;left:0;right:0;height:2px;"
@@ -480,96 +500,125 @@ def _render_hero_row(data, spark_data=None):
         f"price &amp; today &middot; line = last 30 sessions</span>"
         f"<div style='flex:1;height:1px;background:{s['border']}'></div></div>"
     )
-    html = f"{header}<div style='display:flex;gap:6px;flex-wrap:wrap'>{cards}</div>"
-    _wrap(html, 126)
+    # Grid, not flex-wrap. The iframe is a fixed height, so a wrapped second
+    # row was simply cut off -- on a narrow window the last card (STI) vanished
+    # rather than shrinking. A fixed column count squeezes instead, and the
+    # height follows the row count so nothing is ever clipped.
+    n = len(HERO_SYMBOLS)
+    cols = 2 if is_mobile else min(n, 8)
+    rows = -(-n // cols)
+    html = (f"{header}<div style='display:grid;gap:6px;"
+            f"grid-template-columns:repeat({cols},minmax(0,1fr))'>{cards}</div>")
+    _wrap(html, 24 + rows * 102)
 
 
 def _render_heatmap_grid(data):
+    """One line per sector: its best and its worst name today.
+
+    The old grid showed four tinted cells per sector — 60 cells of coloured
+    numbers that had to be read one at a time. A sector is usually only worth a
+    glance to see what led it and what dragged it, so that is all this shows,
+    and the bars make the size of the move comparable down the column.
+    """
     t = get_theme()
     s = _s()
     pos_c, neg_c = t['pos'], t['neg']
-    is_light = get_theme().get('mode') == 'light'
 
-    def _bg(change, pos, neg):
-        abs_c = min(abs(change), 5)
-        opacity = 0.15 + (abs_c / 5) * 0.55 if is_light else 0.25 + (abs_c / 5) * 0.75
-        base = pos if change >= 0 else neg
-        r, g, b = int(base[1:3], 16), int(base[3:5], 16), int(base[5:7], 16)
-        return f'rgba({r},{g},{b},{opacity:.2f})', abs_c
-
-    sectors_html = ''
-    active_sectors = 0
+    rows = []
     for sector, syms in HEATMAP_SECTORS.items():
-        # top 2 gainers + top 2 losers
-        sector_data = [(sym, data.get(sym, {}).get('change', 0)) for sym in syms if data.get(sym)]
-        if not sector_data:
+        vals = [(sym, data[sym]['change']) for sym in syms if data.get(sym)]
+        if not vals:
             continue
-        sector_data.sort(key=lambda x: x[1], reverse=True)
-        display = sector_data if len(sector_data) <= 4 else sector_data[:2] + sector_data[-2:]
-        cells = ''
-        for sym, change in display:
-            name = clean_symbol(sym)
-            bg, intensity = _bg(change, pos_c, neg_c)
-            if intensity > 3:
-                name_c = '#ffffff' if not is_light else '#1e293b'
-                val_c = '#ffffff' if not is_light else '#1e293b'
-            else:
-                name_c = s['hm_txt']
-                val_c = pos_c if change >= 0 else neg_c
-            sign = '+' if change >= 0 else ''
-            cell_border = 'rgba(0,0,0,0.06)' if is_light else 'rgba(255,255,255,0.04)'
-            cells += (
-                f"<div style='flex:1;min-width:60px;padding:6px 8px;background:{bg};"
-                f"border-radius:3px;border:1px solid {cell_border};text-align:center'>"
-                f"<div style='color:{name_c};font-size:10px;font-weight:600'>{name}</div>"
-                f"<div style='color:{val_c};font-size:11px;font-weight:700;margin-top:1px;"
-                f"font-variant-numeric:tabular-nums'>{sign}{change:.2f}%</div>"
-                f"</div>"
-            )
-        active_sectors += 1
-        sectors_html += (
-            f"<div style='margin-bottom:6px'>"
-            f"<div style='color:#f8fafc;font-size:8px;font-weight:600;letter-spacing:0.1em;"
-            f"text-transform:uppercase;margin-bottom:4px;padding-left:2px'>{sector}</div>"
-            f"<div style='display:flex;gap:4px;flex-wrap:wrap'>{cells}</div>"
-            f"</div>"
+        vals.sort(key=lambda x: x[1], reverse=True)
+        rows.append((sector, vals[0], vals[-1]))
+    if not rows:
+        return
+
+    # One scale for the whole panel, so a 6% move looks twice a 3% move
+    # wherever it sits.
+    max_abs = max(max(abs(b[1]), abs(w[1])) for _, b, w in rows) or 1
+
+    def _half(sym, change, colour, align):
+        pct = max(abs(change) / max_abs * 100, 6)
+        sign = '+' if change >= 0 else ''
+        grad = '90deg' if align == 'left' else '270deg'
+        return (
+            f"<div style='flex:1;display:flex;align-items:center;gap:6px'>"
+            f"<div style='width:52px;flex-shrink:0;color:{s['text']};font-size:10px;"
+            f"font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"
+            f"{clean_symbol(sym)}</div>"
+            f"<div style='flex:1;position:relative;height:16px;background:{s['bar_bg']};"
+            f"border-radius:2px;overflow:hidden'>"
+            f"<div style='position:absolute;top:0;{align}:0;height:100%;width:{pct}%;"
+            f"background:linear-gradient({grad},{colour}20,{colour}60)'></div>"
+            f"<span style='position:absolute;top:50%;transform:translateY(-50%);{align}:6px;"
+            f"color:{colour};font-size:10px;font-weight:700;"
+            f"font-variant-numeric:tabular-nums'>{sign}{change:.2f}%</span>"
+            f"</div></div>"
+        )
+
+    body = ''
+    for i, (sector, best, worst) in enumerate(rows):
+        alt = s['row_alt'] if i % 2 else 'transparent'
+        body += (
+            f"<div style='display:flex;align-items:center;gap:10px;padding:5px 8px;"
+            f"background:{alt};border-radius:3px'>"
+            f"<div style='width:92px;flex-shrink:0;color:#f8fafc;font-size:9px;"
+            f"font-weight:600;letter-spacing:0.06em;text-transform:uppercase;"
+            f"overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>{sector}</div>"
+            + _half(best[0], best[1], pos_c, 'left')
+            + _half(worst[0], worst[1], neg_c, 'right')
+            + "</div>"
         )
 
     html = (
-        f"<div style='padding:10px 12px;background:{s['bg2']};border:1px solid {s['border']};border-radius:6px'>"
-        f"<div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:8px'>"
+        f"<div style='padding:10px 12px;background:{s['bg2']};border:1px solid {s['border']};"
+        f"border-radius:6px'>"
+        f"<div style='display:flex;justify-content:space-between;align-items:center;"
+        f"margin-bottom:6px'>"
         f"<span style='color:#f8fafc;font-size:9px;font-weight:600;letter-spacing:0.1em;"
-        f"text-transform:uppercase'>MARKET HEATMAP</span>"
-        f"<span style='color:{s['muted']};font-size:8px'>Day Change %</span>"
-        f"</div>"
-        f"{sectors_html}</div>"
+        f"text-transform:uppercase'>SECTOR LEADERS</span>"
+        f"<span style='color:{s['muted']};font-size:8px'>best &amp; worst today &middot; "
+        f"one scale across all rows</span></div>"
+        f"{body}</div>"
     )
-    _wrap(html, 52 * active_sectors + 50)
+    _wrap(html, 28 * len(rows) + 46)
 
 
 def _render_movers(data):
     t = get_theme()
     s = _s()
     pos_c, neg_c = t['pos'], t['neg']
-    all_items = [(sym, d['change']) for sym, d in data.items()]
+    all_items = [(sym, d['change'], d.get('out', '')) for sym, d in data.items()]
     all_items.sort(key=lambda x: x[1], reverse=True)
-    gainers = [(sc, c) for sc, c in all_items if c > 0][:5]
-    losers = [(sc, c) for sc, c in all_items if c < 0][-5:]
+    gainers = [i for i in all_items if i[1] > 0][:5]
+    losers = [i for i in all_items if i[1] < 0][-5:]
     losers.reverse()
 
     def _rows(items, color, is_gain):
         if not items:
             return f"<div style='color:{s['muted']};font-size:10px;padding:8px'>No data</div>"
-        max_abs = max(abs(c) for _, c in items) or 1
+        max_abs = max(abs(c) for _, c, _ in items) or 1
         html = ''
-        for sym, change in items:
+        for sym, change, out in items:
             short = clean_symbol(sym)
             bar_pct = max(abs(change) / max_abs * 85, 8)
             sign = '+' if change >= 0 else ''
+            # Outside yesterday's range, not just up or down within it.
+            if out == 'above':
+                brk = f"<span style='color:{pos_c};font-size:9px'>&#9650;</span>"
+                brk_tip = 'Above previous session high'
+            elif out == 'below':
+                brk = f"<span style='color:{neg_c};font-size:9px'>&#9660;</span>"
+                brk_tip = 'Below previous session low'
+            else:
+                brk = f"<span style='color:{s['muted']};font-size:9px'>&middot;</span>"
+                brk_tip = 'Inside previous session range'
             align = 'left' if is_gain else 'right'
             grad_dir = '90deg' if is_gain else '270deg'
             html += (
                 f"<div style='display:flex;align-items:center;padding:5px 0;gap:6px'>"
+                f"<div style='width:12px;flex-shrink:0;text-align:center' title='{brk_tip}'>{brk}</div>"
                 f"<div style='width:45px;flex-shrink:0'>"
                 f"<span style='color:{s['text']};font-size:10px;font-weight:600'>{short}</span></div>"
                 f"<div style='flex:1;position:relative;height:18px;background:{s['bar_bg']};border-radius:2px;overflow:hidden'>"
@@ -591,114 +640,22 @@ def _render_movers(data):
         f"<div>"
         f"<div style='color:#f8fafc;font-size:9px;font-weight:600;letter-spacing:0.1em;"
         f"margin-bottom:6px;display:flex;align-items:center;gap:4px'>"
-        f"<span style='color:{pos_c};font-size:12px'>&#9650;</span> TOP GAINERS</div>"
+        f"<span style='color:{pos_c};font-size:12px'>&#9650;</span> TOP GAINERS"
+        f"<span style='color:{s['muted']};font-size:8px;font-weight:500;letter-spacing:0.06em;"
+        f"margin-left:6px'>TODAY &middot; &#9650; = OUTSIDE PREV SESSION</span></div>"
         f"{gain_html}</div>"
         f"<div>"
         f"<div style='color:#f8fafc;font-size:9px;font-weight:600;letter-spacing:0.1em;"
         f"margin-bottom:6px;display:flex;align-items:center;gap:4px'>"
-        f"<span style='color:{neg_c};font-size:12px'>&#9660;</span> TOP LOSERS</div>"
+        f"<span style='color:{neg_c};font-size:12px'>&#9660;</span> TOP LOSERS"
+        f"<span style='color:{s['muted']};font-size:8px;font-weight:500;letter-spacing:0.06em;"
+        f"margin-left:6px'>TODAY &middot; % VS PREV CLOSE</span></div>"
         f"{lose_html}</div></div>"
     )
     h = 28 * n_rows + 50
     _wrap(html, h)
     return h
 
-
-
-# One box per outlet — no commingling, so each masthead gets its own slot and
-# a busy wire can never crowd out a quiet one.
-PULSE_NEWS_SOURCES = [
-    ('STRAITS TIMES',    'ST',        'https://www.straitstimes.com/news/business/rss.xml'),
-    ('CNA',              'CNA',       'https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml&category=6511'),
-    ('BLOOMBERG',        'Bloomberg', 'https://feeds.bloomberg.com/markets/news.rss'),
-    ('FT',               'FT',        'https://www.ft.com/rss/home'),
-    ('SCMP',             'SCMP',      'https://www.scmp.com/rss/5/feed'),
-    ('NIKKEI',           'Nikkei',    'https://asia.nikkei.com/rss/feed/nar'),
-    # www.businessinsider.com/rss, not markets.businessinsider.com/rss/news —
-    # the markets feed is mostly syndicated press releases.
-    ('BUSINESS INSIDER', 'BI',        'https://www.businessinsider.com/rss'),
-]
-
-PULSE_NEWS_PER_SOURCE = 5
-PULSE_NEWS_COLS = 3          # boxes per row on desktop; 7 sources -> 3 + 3 + 1
-_NEWS_ROW_H  = 26   # measured row height, px
-_NEWS_HEAD_H = 24   # box header
-_NEWS_GAP    = 6
-
-
-def pulse_news_height(cols=PULSE_NEWS_COLS):
-    """Exact height for the source-box grid — every row visible, no scroll."""
-    n = len(PULSE_NEWS_SOURCES)
-    box = _NEWS_HEAD_H + PULSE_NEWS_PER_SOURCE * _NEWS_ROW_H
-    grid_rows = -(-n // max(1, cols))
-    return grid_rows * box + _NEWS_GAP * (grid_rows - 1)
-
-
-def _render_pulse_news(cols=PULSE_NEWS_COLS):
-    """News panel — one box per outlet, PULSE_NEWS_PER_SOURCE headlines each,
-    laid out side by side so the whole wire is visible at a glance.
-
-    Height is derived from the content: boxes are sized to show every row, so
-    nothing needs scrolling to be read.
-    """
-    from news import fetch_rss_feed, backfill_missing_dates
-    s = _s()
-
-    box_h = _NEWS_HEAD_H + PULSE_NEWS_PER_SOURCE * _NEWS_ROW_H
-    total_h = pulse_news_height(cols)
-
-    def _rows(items):
-        out = ''
-        for i, item in enumerate(items):
-            bg = s['bg2'] if i % 2 == 0 else s['row_alt']
-            # No source label: the box header already names the outlet, so the
-            # space goes to the headline instead.
-            out += (
-                "<div style='padding:4px 10px;background:" + bg + ";border-bottom:1px solid " + s['border'] + "18;"
-                "display:flex;align-items:baseline;gap:6px;font-family:" + FONTS + ";white-space:nowrap;overflow:hidden'>"
-                "<span style='flex-shrink:0;width:34px;color:" + s['muted'] + ";font-size:9px'>"
-                + item.get('date', '') + "</span>"
-                "<a href='" + item.get('url', '#') + "' target='_blank' title='" + item.get('title', '') + "' "
-                "style='color:" + s['link'] + ";text-decoration:none;flex:1;min-width:0;"
-                "font-size:10.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>"
-                + item.get('title', '') + "</a>"
-                "</div>"
-            )
-        return out
-
-    boxes = ''
-    rendered = 0
-    for heading, name, url in PULSE_NEWS_SOURCES:
-        items = fetch_rss_feed(name, url)
-        items.sort(key=lambda x: x.get('sort_key', ''), reverse=True)
-        items = items[:PULSE_NEWS_PER_SOURCE]
-        # Nikkei's feed carries no dates; scrape them off the article pages.
-        # Done after the slice so it costs 5 lookups, not 20.
-        items = backfill_missing_dates(items)
-        items.sort(key=lambda x: x.get('sort_key', ''), reverse=True)
-        rendered += len(items)
-
-        body = _rows(items) if items else (
-            "<div style='padding:10px;color:" + s['muted'] + ";font-size:10px;text-align:center'>Unavailable</div>"
-        )
-        boxes += (
-            "<div style='background:" + s['bg2'] + ";border:1px solid " + s['border'] + ";border-radius:6px;"
-            "overflow:hidden;display:flex;flex-direction:column;height:" + str(box_h) + "px'>"
-            "<div style='padding:5px 10px;display:flex;justify-content:space-between;align-items:center;"
-            "border-bottom:1px solid " + s['border'] + ";flex-shrink:0'>"
-            "<span style='color:#f8fafc;font-size:9px;font-weight:600;letter-spacing:0.1em'>" + heading + "</span>"
-            "<span style='color:" + s['muted'] + ";font-size:9px;font-weight:500'>" + str(len(items)) + "</span></div>"
-            "<div style='overflow-y:auto;flex:1;min-height:0'>" + body + "</div>"
-            "</div>"
-        )
-
-    if not rendered:
-        return
-    _wrap(
-        "<div style='display:grid;grid-template-columns:repeat(" + str(cols) + ",minmax(0,1fr));"
-        "gap:" + str(_NEWS_GAP) + "px;font-family:" + FONTS + "'>" + boxes + "</div>",
-        total_h,
-    )
 
 
 # ── BREAKOUT TABLES (week + month) ───────────────────────────────────────────
@@ -877,11 +834,10 @@ def render_pulse_tab(is_mobile):
         return
 
     _render_market_status_bar()
-    _render_hero_row(data, spark_data)
+    _render_hero_row(data, spark_data, is_mobile)
 
     # News first and full width, then the market panels — the news grid is the
     # thing being scanned, so it leads rather than sitting in a side column.
-    _render_pulse_news(cols=1 if is_mobile else PULSE_NEWS_COLS)
     _render_movers(data)
     _render_breakout_tables(breakout_data, pulse_data=data, is_mobile=is_mobile)
     _render_heatmap_grid(data)

@@ -9,6 +9,16 @@ from plotly.subplots import make_subplots
 import logging
 
 from config import THEMES, SYMBOL_NAMES, FONTS
+# The statistics are SPREADS' definitions, imported rather than re-derived so a
+# number means the same thing on both tabs. Each carries a guard that matters:
+# ER masks unobserved intraday gaps, ROA refuses a drawdown too small to be
+# real, Sortino divides by every bar rather than the losing ones, and the
+# anchored curve lets an opening loss register as a drawdown. See spreads.py.
+from spreads import (_spread_er, _spread_roa, _spread_sortino, _spread_curve,
+                     MIN_DD_PCT, MAX_RATIO,
+                     composite_ranks as _spread_composite_ranks,
+                     length_adjusted as _spread_length_adjusted,
+                     rank_by_length_adjusted as _spread_rank_by_length_adjusted)
 
 logger = logging.getLogger(__name__)
 
@@ -64,10 +74,81 @@ PERIOD_OPTIONS = OrderedDict([
     ('10 Years', 3650), ('Max', 9999),
 ])
 
+# The objective list and its order are SPREADS' SORT_OPTIONS, so the same nine
+# names mean the same nine things on both tabs. Composite leads because it is
+# the only one that does not let a single statistic decide on its own.
+OBJECTIVES = ['Composite', 'Sharpe', 'Sortino', 'ROA', 'ER', 'MAR', 'R\u00b2',
+              'Total Return', 'Win Rate']
+
 SCORE_TO_RANK = {
-    'Win Rate': 'win_rate', 'Sharpe': 'sharpe', 'Sortino': 'sortino',
-    'MAR': 'mar', 'R²': 'r2', 'Composite': 'sharpe', 'Total Return': 'total_ret',
+    'Composite': '_score', 'Sharpe': 'sharpe', 'Sortino': 'sortino',
+    'ROA': 'roa', 'ER': 'er', 'MAR': 'mar', 'R\u00b2': 'r2',
+    'Total Return': 'total_ret', 'Win Rate': 'win_rate',
 }
+
+# What Composite averages the ranks of, in PORTFOLIO's metric names. Same four
+# SPREADS ranks on, and for the same reasons: MAR pins to its cap on short
+# windows and R2 measures almost what ER does, so ranking on either would be
+# arbitrary tie-breaking or double-counted straightness.
+COMPOSITE_METRICS = ('sharpe', 'sortino', 'roa', 'er')
+
+# Metrics a smaller number wins on. Composite scores a mean RANK, so 1.0 is the
+# best possible and sorting it the usual way would put the worst row on top.
+LOWER_IS_BETTER = {'_score', 'ann_vol', 'max_dd', 'avg_dd'}
+
+
+def _with_span(items):
+    """SPREADS reads a window length off a 'Days' key; PORTFOLIO records it as
+    span_days. One place to bridge the two names."""
+    for m in items:
+        m.setdefault('Days', m.get('span_days') or m.get('n_days') or 0)
+    return items
+
+
+def rank_rows(items, key, reverse=True):
+    """ITEMS ordered on KEY after SPREADS' sample-size shrink.
+
+    Every metric the tables rank on goes through this, not only the four inside
+    Composite. Rows that scored different-length windows are not otherwise
+    comparable: the walk-forward approaches burn different warm-ups, and two
+    baskets can differ by years because one of them is full of 2024 listings.
+    The shrink only reorders -- the columns still show the real numbers.
+    """
+    return _spread_rank_by_length_adjusted(_with_span(items), key, reverse)
+
+
+def composite_ranks(items, metrics=COMPOSITE_METRICS, score_key='_score'):
+    """SPREADS' composite, computed on PORTFOLIO's metric names.
+
+    One implementation for both tabs: the average rank across Sharpe, Sortino,
+    ROA and ER, each value first shrunk by sqrt(span / longest span in the set)
+    so a series that only has a few months of history cannot top the board on a
+    noisy draw. It is the discount that makes these rows comparable at all --
+    walk-forward approaches burn different warm-ups, so a 24mo approach scores a
+    visibly shorter window than a 3mo one on the same basket, and two baskets
+    can differ by years because one of them is full of 2024 listings.
+
+    The span comes off a 'Days' key, which is what SPREADS' implementation reads
+    and what the setdefault below supplies from _calc_oos_metrics' calendar span.
+    Mutates and returns ITEMS; lower score is better.
+    """
+    return _spread_composite_ranks(_with_span(items), metrics=list(metrics),
+                                   score_key=score_key)
+
+
+def best_approach(results, rank_metric):
+    """The winning approach name under RANK_METRIC.
+
+    Length-adjusted and direction-aware, so it agrees with the order the ranking
+    table draws rather than second-guessing it.
+    """
+    names = list(results)
+    if not names:
+        return None
+    adj = _spread_length_adjusted(_with_span([results[k]['metrics'] for k in names]),
+                                  rank_metric)
+    sign = -1.0 if rank_metric in LOWER_IS_BETTER else 1.0
+    return names[max(range(len(names)), key=lambda i: sign * adj[i])]
 
 # =============================================================================
 # DATA FETCHING
@@ -96,7 +177,7 @@ def fetch_symbol_history(symbols_tuple, days=1800, min_history_days=0):
     for sym in symbols:
         try:
             ticker = yf.Ticker(sym)
-            hist = ticker.history(start=start)
+            hist = ticker.history(start=start, auto_adjust=True)
             if not hist.empty and len(hist) >= 50:
                 closes = hist['Close'].copy()
                 closes.index = closes.index.tz_localize(None) if closes.index.tz else closes.index
@@ -139,7 +220,7 @@ def fetch_benchmark_history(symbol, days=1800):
     if not symbol: return None
     start = (datetime.now() - pd.Timedelta(days=days)).strftime('%Y-%m-%d')
     try:
-        hist = yf.Ticker(symbol).history(start=start)
+        hist = yf.Ticker(symbol).history(start=start, auto_adjust=True)
     except Exception as e:
         logger.warning(f"[{symbol}] benchmark fetch error: {e}")
         return None
@@ -235,18 +316,51 @@ def _optimize_window_vectorized(returns_array, n_portfolios, n_assets, max_weigh
         ret_shortfall = np.maximum(min_ann_ret - ann_rets, 0)
         penalty += ret_shortfall * 50
 
+    # The row-wise twins of spreads._spread_* , one row per candidate portfolio.
+    # They are the same formulas; change one and change the other.
+    def _vec_curve(pr):
+        """Equity anchored at 1.0, as in spreads._spread_curve. pr came from a
+        pct_change that already ate bar zero, so without the anchor the first
+        bar is its own running maximum and an opening loss cannot register."""
+        return np.hstack([np.ones((pr.shape[0], 1)), np.cumprod(1 + pr, axis=1)])
+
     def _vec_downside_vol(pr):
+        """RMS of min(r, 0) over EVERY bar, as in spreads._spread_sortino.
+        Averaging the squares over the losing bars alone divides by the count of
+        losers, which understated Sortino by about 44% on these series."""
         neg = np.minimum(pr, 0)
-        n_neg = np.maximum(np.sum(pr < 0, axis=1).astype(float), 1)
-        return np.sqrt(np.sum(neg**2, axis=1) / n_neg) * np.sqrt(252)
+        return np.sqrt(np.mean(neg**2, axis=1)) * np.sqrt(252)
 
     def _vec_avg_dd(pr):
-        cum = np.cumprod(1 + pr, axis=1)
-        peak = np.maximum.accumulate(cum, axis=1)
-        dd = (cum - peak) / peak
+        curve = _vec_curve(pr)
+        peak = np.maximum.accumulate(curve, axis=1)
+        dd = (curve - peak) / peak
         neg_dd = np.where(dd < 0, dd, 0)
         n_neg = np.maximum(np.sum(dd < 0, axis=1).astype(float), 1)
         return np.sum(neg_dd, axis=1) / n_neg
+
+    def _vec_roa(pr):
+        """Total return over the worst hole. Refuses to score a candidate whose
+        worst drawdown is under one typical bar of its own movement -- that is
+        not a portfolio avoiding a hole, it is too few bars to have had one."""
+        curve = _vec_curve(pr)
+        peak = np.maximum.accumulate(curve, axis=1)
+        mdd = ((curve - peak) / peak).min(axis=1) * 100.0
+        total = (curve[:, -1] - 1.0) * 100.0
+        floor = np.maximum(MIN_DD_PCT, np.median(np.abs(pr), axis=1) * 100.0)
+        denom = np.where(np.abs(mdd) > 0, np.abs(mdd), 1.0)
+        return np.where(np.abs(mdd) < floor, 0.0,
+                        np.clip(total / denom, -MAX_RATIO, MAX_RATIO))
+
+    def _vec_er(pr):
+        """Kaufman efficiency ratio, signed: |net move| / path length. 1.0 is a
+        straight line, 0.0 is chop that goes nowhere. No gap mask here -- these
+        are daily bars, where a weekend is not an unobserved gap."""
+        d = np.diff(_vec_curve(pr), axis=1)
+        path = np.abs(d).sum(axis=1)
+        net = d.sum(axis=1)
+        er = np.where(path > 0, np.abs(net) / np.where(path > 0, path, 1.0), 0.0)
+        return np.where(net >= 0, er, -er)
 
     if score_type == 'Win Rate':
         scores = np.mean(port_returns > 0, axis=1)
@@ -259,6 +373,10 @@ def _optimize_window_vectorized(returns_array, n_portfolios, n_assets, max_weigh
     elif score_type == 'MAR':
         avg_dd = _vec_avg_dd(port_returns)
         scores = np.where(avg_dd < 0, ann_rets / np.abs(avg_dd), 0)
+    elif score_type == 'ROA':
+        scores = _vec_roa(port_returns)
+    elif score_type == 'ER':
+        scores = _vec_er(port_returns)
     elif score_type == 'R²':
         cum = np.cumprod(1 + port_returns, axis=1)
         n = cum.shape[1]; x = np.arange(n, dtype=float); xm = x.mean()
@@ -271,14 +389,20 @@ def _optimize_window_vectorized(returns_array, n_portfolios, n_assets, max_weigh
         slope = np.where(ss_xx > 0, ss_xy / ss_xx, 0)
         scores = np.where(slope > 0, scores, -scores)
     elif score_type == 'Composite':
+        # The same four COMPOSITE_METRICS averages, equally weighted, as a rank
+        # percentile instead of a rank so that larger is better here. No
+        # sample-size discount: every candidate is scored on the SAME window, so
+        # the factor composite_ranks applies across baskets would be 1.0 for all
+        # of them.
         sharpes = np.where(ann_vols > 0, ann_rets / ann_vols, 0)
         dv = _vec_downside_vol(port_returns)
         sortinos = np.where(dv > 0, ann_rets / dv, 0)
-        win_rates = np.mean(port_returns > 0, axis=1)
         def _rank_pct(a):
             r = a.argsort().argsort().astype(float)
             return r / max(len(r) - 1, 1)
-        scores = 0.4 * _rank_pct(sharpes) + 0.3 * _rank_pct(sortinos) + 0.3 * _rank_pct(win_rates)
+        scores = np.mean([_rank_pct(v) for v in (sharpes, sortinos,
+                                                 _vec_roa(port_returns),
+                                                 _vec_er(port_returns))], axis=0)
     else:  # Sharpe
         scores = np.where(ann_vols > 0, ann_rets / ann_vols, 0)
 
@@ -434,14 +558,24 @@ def _calc_oos_metrics(returns_series):
     if n < 5: return None
     cum = np.cumprod(1 + r); total = float(cum[-1] - 1)
     ann_ret = float(np.mean(r) * 252); ann_vol = float(np.std(r, ddof=1) * np.sqrt(252))
-    peak = np.maximum.accumulate(cum); dd = (cum - peak) / peak
+    # Drawdowns off the anchored curve, as in spreads._spread_drawdowns: cum
+    # starts one bar in, so unanchored the first bar is its own running maximum
+    # and a portfolio that gapped down on day one reported a 0.00% drawdown.
+    anchored = _spread_curve(r)
+    a_peak = np.maximum.accumulate(anchored); dd = (anchored - a_peak) / a_peak
     max_dd = float(np.min(dd)); avg_dd = float(np.mean(dd[dd < 0])) if np.any(dd < 0) else 0.0
     win_rate = float(np.sum(r > 0) / n)
     sharpe = float(ann_ret / ann_vol) if ann_vol > 0 else 0.0
-    neg = np.minimum(r, 0); n_neg = max(np.sum(r < 0), 1)
-    down_vol = float(np.sqrt(np.sum(neg**2) / n_neg) * np.sqrt(252))
-    sortino = float(ann_ret / down_vol) if down_vol > 0 else 0.0
-    mar = float(ann_ret / abs(avg_dd)) if avg_dd != 0 else 0.0
+    # The four Composite ranks on, all SPREADS' definitions. Sortino's
+    # denominator is the RMS of min(r, 0) over EVERY bar; dividing by the count
+    # of losing bars instead inflated it and understated Sortino by about 44%.
+    # MAR takes the same floor and cap, or a portfolio that barely moved posts
+    # one in the hundreds. _spread_roa wants max_dd in percent.
+    sortino = _spread_sortino(returns_series, 252)
+    mar = float(np.clip(ann_ret * 100 / max(abs(avg_dd * 100), MIN_DD_PCT),
+                        -MAX_RATIO, MAX_RATIO))
+    er = _spread_er(returns_series)
+    roa = _spread_roa(returns_series, max_dd * 100)
     if n > 2:
         x = np.arange(n, dtype=float); xm, ym = x.mean(), cum.mean()
         ss_xy = np.sum(x * cum) - n * xm * ym
@@ -456,11 +590,16 @@ def _calc_oos_metrics(returns_series):
     mtd_mask = idx >= pd.Timestamp(now.year, now.month, 1)
     ytd = float(np.prod(1 + r[ytd_mask]) - 1) if ytd_mask.any() else 0.0
     mtd = float(np.prod(1 + r[mtd_mask]) - 1) if mtd_mask.any() else 0.0
-    oos_years = (idx[-1] - idx[0]).days / 365.25
+    # Calendar span, not bars: it is what composite_ranks discounts on, and bars
+    # would penalise a crypto basket for printing 365 of them a year against an
+    # equity basket's 252 over the SAME window -- a denser sample, not a longer.
+    span_days = max(int((idx[-1] - idx[0]).days), 1)
     return {'total_ret': total, 'ann_ret': ann_ret, 'ann_vol': ann_vol,
             'max_dd': max_dd, 'avg_dd': avg_dd, 'win_rate': win_rate,
             'sharpe': sharpe, 'sortino': sortino, 'mar': mar, 'r2': r2,
-            'ytd': ytd, 'mtd': mtd, 'n_days': n, 'oos_years': round(oos_years, 1)}
+            'roa': roa, 'er': er,
+            'ytd': ytd, 'mtd': mtd, 'n_days': n, 'span_days': span_days,
+            'oos_years': round(span_days / 365.25, 1)}
 
 # =============================================================================
 # GRID SEARCH
@@ -534,6 +673,10 @@ def run_walkforward_grid(symbols, score_type='Win Rate', rebal_months=3, n_portf
         r['eq_metrics'] = _calc_oos_metrics(eq_aligned)
         r['eq_n_rebals'] = sum(1 for d in eq_rebal_set if d >= oos_start)
         r['bench'] = _bench_metrics(bench, oos_start)
+    # Every approach burns a different warm-up, so they do NOT share a window:
+    # 24mo Avg scores two years less than 3mo on the same basket. The discount
+    # inside composite_ranks is what keeps that comparison honest.
+    composite_ranks([r['metrics'] for r in results.values()])
     return {'results': results, 'symbols': valid, 'returns': returns,
             'eq_returns': eq_ret, 'eq_rebal_set': eq_rebal_set,
             'bench_symbols': [b[0] for b in bench], 'bench_failed': bench_failed,
@@ -647,6 +790,9 @@ def run_fullsample(symbols, score_type='Win Rate', n_portfolios=10000,
             logger.warning(f"Full sample failed for {name}: {e}")
 
     if not results: return None
+    # Full sample scores every approach on the whole series, so the spans match
+    # and the discount is 1.0 throughout -- this is here for the _score key.
+    composite_ranks([r['metrics'] for r in results.values()])
     return {'results': results, 'symbols': valid, 'returns': returns,
             'eq_returns': eq_ret, 'eq_rebal_set': eq_rebal_set,
             'bench_symbols': [b[0] for b in bench], 'bench_failed': bench_failed,
@@ -665,8 +811,10 @@ def _fc(v, fmt='f2', neg_is_bad=True):
     return f"<span style='color:{c}'>{s}</span>"
 
 
-# The 10 metric columns between 'Approach' and 'OOS': (key, format, neg_is_bad)
+# The 12 metric columns between 'Approach' and 'OOS': (key, format, neg_is_bad).
+# ROA and ER sit beside Sortino in the same order SPREADS prints them.
 _RANK_COLS = [('win_rate','pct',True), ('sharpe','f2',True), ('sortino','f2',True),
+              ('roa','f2',True), ('er','f2',True),
               ('mar','f2',True), ('r2','f3',True), ('total_ret','pct',True),
               ('ann_ret','pct',True), ('ann_vol','pct',False), ('max_dd','pct',False),
               ('ytd','pct',True)]
@@ -680,10 +828,13 @@ def _tint(hex_color, alpha):
 
 def _compare_row(label, m, rebals, bg, label_color=C_TXT, rule=C_EW):
     """A non-ranked comparison row (equal weight, benchmark) under the ranking."""
-    h = f"<tr><td colspan='14' style='border-bottom:1px solid {rule};padding:0;height:0'></td></tr>"
+    h = f"<tr><td colspan='17' style='border-bottom:1px solid {rule};padding:0;height:0'></td></tr>"
     h += f"<tr style='background:{bg}'>"
     h += f"<td style='{TD}color:{C_MUTE}'>&mdash;</td>"
     h += f"<td style='{TD}color:{label_color};font-weight:700'>{label}</td>"
+    # Equal weight and the benchmarks are comparisons, not candidates: they were
+    # never in the ranked set, so they have no composite to show.
+    h += f"<td style='{TD}text-align:right;color:{C_MUTE}'>&mdash;</td>"
     for key, fmt, nib in _RANK_COLS:
         fw = 'font-weight:700;' if key == 'win_rate' else ('font-weight:600;' if key == 'total_ret' else '')
         h += f"<td style='{TD}text-align:right;{fw}'>{_fc(m[key], fmt, nib)}</td>"
@@ -695,10 +846,11 @@ def _compare_row(label, m, rebals, bg, label_color=C_TXT, rule=C_EW):
 def _delta_row(label, best_m, other_m, rule=C_EW):
     """Best approach minus a comparison row, green when the approach wins."""
     lower_is_better = {'ann_vol', 'max_dd'}
-    h = f"<tr><td colspan='14' style='border-bottom:1px solid {rule};padding:0;height:0'></td></tr>"
+    h = f"<tr><td colspan='17' style='border-bottom:1px solid {rule};padding:0;height:0'></td></tr>"
     h += "<tr style='background:rgba(251,191,36,0.06)'>"
     h += f"<td style='{TD}color:{C_GOLD}'>&Delta;</td>"
     h += f"<td style='{TD}color:{C_GOLD};font-weight:600'>{label}</td>"
+    h += f"<td style='{TD}text-align:right;color:{C_MUTE}'>&mdash;</td>"
     for key, fmt, _nib in _RANK_COLS:
         bv = best_m[key]; ev = other_m[key]; d = bv - ev
         good = abs(bv) < abs(ev) if key in lower_is_better else d > 0
@@ -715,16 +867,20 @@ def _delta_row(label, best_m, other_m, rule=C_EW):
 
 def render_ranking_table(grid, rank_by='win_rate'):
     results = grid['results']
-    lower_better = {'ann_vol', 'max_dd', 'avg_dd'}
     items = [(name, r['metrics'], r) for name, r in results.items()]
-    reverse = rank_by not in lower_better
-    items.sort(key=lambda x: x[1].get(rank_by, 0), reverse=reverse)
+    # The approaches do not share a window -- 24mo Avg burns two more years of
+    # warm-up than 3mo -- so the order is taken on the length-adjusted value of
+    # whichever metric was chosen, not on the raw one the columns print.
+    adj = _spread_length_adjusted(_with_span([m for _n, m, _r in items]), rank_by)
+    sign = -1.0 if rank_by in LOWER_IS_BETTER else 1.0
+    items = [items[i] for i in sorted(range(len(items)), key=lambda i: -sign * adj[i])]
     best_name = items[0][0] if items else None
 
     html = f"<div style='overflow-x:auto;border:1px solid {C_BORDER};border-radius:6px'><table style='border-collapse:collapse;font-family:{FONTS};font-size:11px;width:100%;line-height:1.3'>"
     html += "<thead><tr>"
-    for label, align in [('#','left'),('Approach','left'),('Win%','right'),('Sharpe','right'),
-                          ('Sortino','right'),('MAR','right'),('R²','right'),('Total','right'),
+    for label, align in [('#','left'),('Approach','left'),('Score','right'),('Win%','right'),('Sharpe','right'),
+                          ('Sortino','right'),('ROA','right'),('ER','right'),
+                          ('MAR','right'),('R²','right'),('Total','right'),
                           ('Ann Ret','right'),('Vol','right'),('MaxDD','right'),('YTD','right'),
                           ('OOS','right'),('Rebals','right')]:
         html += f"<th style='{TH}text-align:{align}'>{label}</th>"
@@ -739,9 +895,18 @@ def render_ranking_table(grid, rank_by='win_rate'):
         html += f"<tr style='background:{bg};{best_border}'>"
         html += f"<td style='{TD}color:{C_MUTE}'>{rank}</td>"
         html += f"<td style='{TD}color:{nc};font-weight:{fw}'>{name}{badge}</td>"
+        # Composite: the mean rank across Sharpe, Sortino, ROA and ER after the
+        # length discount, so 1.0 is the best an approach can score and the
+        # column reads the opposite way to every other one.
+        sc = m.get('_score')
+        sc_c = C_MUTE if sc is None else (C_POS if sc <= 3 else (C_TXT2 if sc <= 6 else C_MUTE))
+        sc_s = '&mdash;' if sc is None else f'{sc:.2f}'
+        html += f"<td style='{TD}text-align:right;color:{sc_c};font-weight:600'>{sc_s}</td>"
         html += f"<td style='{TD}text-align:right;font-weight:700'>{_fc(m['win_rate'],'pct')}</td>"
         html += f"<td style='{TD}text-align:right'>{_fc(m['sharpe'])}</td>"
         html += f"<td style='{TD}text-align:right'>{_fc(m['sortino'])}</td>"
+        html += f"<td style='{TD}text-align:right'>{_fc(m['roa'])}</td>"
+        html += f"<td style='{TD}text-align:right'>{_fc(m['er'])}</td>"
         html += f"<td style='{TD}text-align:right'>{_fc(m['mar'])}</td>"
         html += f"<td style='{TD}text-align:right'>{_fc(m['r2'],'f3')}</td>"
         html += f"<td style='{TD}text-align:right;font-weight:600'>{_fc(m['total_ret'],'pct')}</td>"

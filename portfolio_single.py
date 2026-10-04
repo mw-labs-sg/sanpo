@@ -4,12 +4,28 @@ import pandas as pd
 import plotly.graph_objects as go
 from config import FUTURES_GROUPS, THEMES, SYMBOL_NAMES, FONTS, clean_symbol
 from portfolio import (C_MUTE, C_BG, C_TXT, C_TXT2, C_GOLD, BENCH_COLORS, MAX_BENCHMARKS, _tint,
-                       REBAL_OPTIONS, PERIOD_OPTIONS, SCORE_TO_RANK,
+                       REBAL_OPTIONS, PERIOD_OPTIONS, SCORE_TO_RANK, OBJECTIVES,
                        fetch_symbol_history, fetch_notes, benchmark_series, _bench_metrics, _calc_oos_metrics,
                        run_walkforward_grid, run_fullsample,
                        render_ranking_table,
                        render_weights_table, render_oos_chart,
                        render_monthly_table, _section)
+# The universe is ticked, not typed, and it is the same checkbox list SPREADS
+# uses -- one picker, one meaning of "basket", wherever you are.
+from spreads import basket_picker
+
+
+def _pool(picked):
+    """Every symbol in the ticked baskets, deduplicated, in basket order.
+
+    Baskets overlap on purpose -- GC=F sits in Metals and in Inflation Hedge --
+    and a symbol listed twice would take two slices of the same portfolio."""
+    out = []
+    for g in picked:
+        for sym in FUTURES_GROUPS.get(g, []):
+            if sym not in out:
+                out.append(sym)
+    return out
 
 
 def _clean_benchmarks(raw):
@@ -95,7 +111,8 @@ def _validate(symbols, max_wt_str, min_wt_str, min_pos_str, round_str, min_hist_
         except (ValueError, TypeError): return None
 
     if len(symbols) < 2:
-        errors.append('Enter at least 2 symbols to build a portfolio.')
+        errors.append('Tick baskets holding at least 2 symbols between them — '
+                      'a portfolio needs two.')
 
     max_wt, min_wt = num(max_wt_str, 50), num(min_wt_str, 0)
     min_pos, step = num(min_pos_str), num(round_str)
@@ -168,8 +185,7 @@ def render_single_tab(is_mobile):
                     f"<span style='color:#64748b;font-size:10px;margin-left:8px'>{blurb}</span></div>",
                     unsafe_allow_html=True)
 
-    group_names = ['Custom'] + list(FUTURES_GROUPS.keys())
-    _defaults = {'port_preset_name': 'Custom', 'port_sym_input': '', 'port_sims': '10000',
+    _defaults = {'port_sims': '10000',
                  'port_maxwt': '50', 'port_minwt': '0', 'port_cost': '0.10', 'port_maxvol': '',
                  'port_minret': '', 'port_minpos': '', 'port_round': '', 'port_minhist': ''}
     for k, v in _defaults.items():
@@ -177,15 +193,32 @@ def render_single_tab(is_mobile):
     for k, v in [('port_maxwt', '50'), ('port_minwt', '0'), ('port_cost', '0.10'), ('port_sims', '10000')]:
         if not st.session_state.get(k): st.session_state[k] = v
 
-    def _on_portfolio_change():
-        sel = st.session_state.port_selector
-        if sel != 'Custom':
-            st.session_state.port_sym_input = ', '.join(FUTURES_GROUPS.get(sel, []))
-        st.session_state.port_preset_name = sel
-
     # ---------------------------------------------------------------- what to trade
-    _group('WHAT TO TRADE', 'the basket, and what to measure it against')
-    a1, a2, a3, a4 = st.columns(4)
+    # No group header above this one: the picker's own BASKETS IN PLAY label
+    # already says what it is, and a second heading over it was just noise.
+    # Ticked, not typed. The Preset selectbox could only load one basket and the
+    # Symbols box was the real input after that, so a two-basket universe meant
+    # pasting tickers by hand; the picker makes it a pair of clicks. Ticking
+    # several pools their symbols into ONE portfolio -- the All sub-tab is the
+    # view that keeps each basket separate.
+    picked = basket_picker('po', is_mobile, theme, label='Baskets in play')
+    symbols = _pool(picked)
+    dupes = sum(len(FUTURES_GROUPS.get(g, [])) for g in picked) - len(symbols)
+    overlap = f' \u00b7 {dupes} duplicate{"s" if dupes != 1 else ""} dropped' if dupes else ''
+    st.markdown(f"<div style='font-size:10px;color:{C_MUTE};font-family:{FONTS};"
+                f"padding:2px 0 8px 2px'>{len(picked)} baskets \u00b7 {len(symbols):,} "
+                f"symbols{overlap}</div>", unsafe_allow_html=True)
+
+    # The name the results carry. One basket names itself; several are only
+    # honestly described by their count.
+    if len(picked) == 1:
+        st.session_state.port_preset_name = picked[0]
+    elif picked:
+        st.session_state.port_preset_name = f'{len(picked)} baskets'
+    else:
+        st.session_state.port_preset_name = 'Portfolio'
+
+    a1, a2 = st.columns(2)
     with a1:
         mode = st.selectbox('Mode', ['Monte Carlo (Walk-Forward)', 'Monte Carlo (Full Sample)', 'Equal Weight'],
                             key='port_mode',
@@ -194,14 +227,6 @@ def render_single_tab(is_mobile):
                                  'and scores the same data, which flatters. Equal Weight skips optimisation: every '
                                  'asset gets 1/N.')
     with a2:
-        idx = group_names.index(st.session_state.port_preset_name) if st.session_state.port_preset_name in group_names else 0
-        st.selectbox('Preset', group_names, index=idx, key='port_selector', on_change=_on_portfolio_change,
-                     help='Load a saved basket into Symbols, or pick Custom and type your own.')
-    with a3:
-        sym_input = st.text_input('Symbols', key='port_sym_input', placeholder='AAPL, MSFT, GOOG, ...',
-                                  help='The tickers to split money across, comma-separated (Yahoo symbols). '
-                                       'At least 2.')
-    with a4:
         bench_input = st.text_input('Benchmark (optional)', key='port_bench',
                                     placeholder=f'e.g. SPY, XLV (max {MAX_BENCHMARKS})',
                                     help='Comparison tickers, comma-separated. They get no weight and are not part of '
@@ -216,11 +241,16 @@ def render_single_tab(is_mobile):
     _group('HOW TO TEST', 'what the optimiser aims at, and over what history')
     b1, b2, b3, b4 = st.columns(4)
     with b1:
-        score = st.selectbox('Objective', ['Win Rate', 'Composite', 'Sharpe', 'Sortino', 'MAR', 'R\u00b2', 'Total Return'],
-                             key='port_score', disabled=_dis,
-                             help='What the optimiser maximises. Win Rate = share of up days. Sharpe = return per unit '
-                                  'of volatility. Sortino = same but only downside volatility. MAR = return per unit of '
-                                  'average drawdown. R\u00b2 = how straight the equity curve is. Total Return = raw growth.')
+        score = st.selectbox('Objective', OBJECTIVES, key='port_score', disabled=_dis,
+                             help='What the optimiser maximises, and what the ranking table then sorts on \u2014 the '
+                                  'same nine SPREADS offers. Composite is the average rank across Sharpe, Sortino, '
+                                  'ROA and ER, each discounted by the square root of the window length so an '
+                                  'approach that burned a long warm-up cannot win on the short sample left over. '
+                                  'Sharpe = return per unit of volatility. Sortino = same but only downside '
+                                  'volatility. ROA = total return over the worst drawdown. ER = how straight the '
+                                  'equity curve is, 1.0 being a straight line. MAR = return per unit of average '
+                                  'drawdown. R\u00b2 = straightness again, fitted. Total Return = raw growth. '
+                                  'Win Rate = share of up days.')
     with b2:
         rebal_label = st.selectbox('Rebalance', list(REBAL_OPTIONS.keys()), index=2, key='port_rebal',
                                    help='How often holdings are reset to target weights. Every reset pays Cost % on what '
@@ -313,11 +343,8 @@ def render_single_tab(is_mobile):
     except (ValueError, TypeError): txn_cost = 0.001
 
     if run_clicked:
-        raw = sym_input.strip()
-        if not raw:
-            st.warning('Enter symbols'); return
-        symbols = [s.strip().upper() for s in raw.replace(';', ',').split(',') if s.strip()]
-        symbols = list(dict.fromkeys(symbols))
+        if not symbols:
+            st.warning('No baskets ticked \u2014 nothing to run.'); return
 
         errors, notes = _validate(symbols, max_wt_str, min_wt_str, min_pos_str, round_str,
                                   min_hist_str, cost_str, sims_str, fetch_days)
@@ -394,14 +421,9 @@ def _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
 
     _note_window(symbols, fetch_days, min_hist_days)
     st.session_state.port_grid = grid
-    preset_name = st.session_state.get('port_preset_name', 'Custom')
-    if preset_name == 'Custom' or not preset_name:
-        sym_set = set(symbols)
-        for pname, psyms in FUTURES_GROUPS.items():
-            if set(psyms) == sym_set:
-                preset_name = pname; break
-        else:
-            preset_name = 'Portfolio'
+    # Named from the ticked baskets before the run started, so the reverse lookup
+    # that used to put a name to a typed symbol list has nothing left to guess at.
+    preset_name = st.session_state.get('port_preset_name') or 'Portfolio'
     st.session_state.port_params = {
         'score': score, 'rebal_label': st.session_state.get('port_rebal', 'Quarterly'),
         'period_label': st.session_state.get('port_period', '5 Years'),
@@ -466,6 +488,8 @@ def _display_mc(is_mobile, _lbl):
         <span>Win% <b style='color:{portfolio.C_POS}'>{sm["win_rate"]*100:.1f}%</b>
         &nbsp;Sharpe <b style='color:{portfolio.C_POS}'>{sm["sharpe"]:.2f}</b>
         &nbsp;Sortino <b style='color:{portfolio.C_POS}'>{sm["sortino"]:.2f}</b>
+        &nbsp;ROA <b style='color:{portfolio.C_POS}'>{sm["roa"]:.2f}</b>
+        &nbsp;ER <b style='color:{portfolio.C_POS}'>{sm["er"]:.2f}</b>
         &nbsp;MAR <b style='color:{portfolio.C_POS}'>{sm["mar"]:.2f}</b></span>
     </div>""", unsafe_allow_html=True)
 
@@ -524,14 +548,9 @@ def _run_fs(symbols, score, rebal_label, rebal, period_label, fetch_days,
 
     _note_window(symbols, fetch_days, min_hist_days)
     st.session_state.port_fs_result = grid
-    preset_name = st.session_state.get('port_preset_name', 'Custom')
-    if preset_name == 'Custom' or not preset_name:
-        sym_set = set(symbols)
-        for pname, psyms in FUTURES_GROUPS.items():
-            if set(psyms) == sym_set:
-                preset_name = pname; break
-        else:
-            preset_name = 'Portfolio'
+    # Named from the ticked baskets before the run started, so the reverse lookup
+    # that used to put a name to a typed symbol list has nothing left to guess at.
+    preset_name = st.session_state.get('port_preset_name') or 'Portfolio'
     st.session_state.port_fs_params = {
         'score': score, 'rebal_label': st.session_state.get('port_rebal', 'Quarterly'),
         'period_label': st.session_state.get('port_period', '5 Years'),
@@ -596,6 +615,8 @@ def _display_fs(is_mobile, _lbl):
         <span>Win% <b style='color:{portfolio.C_POS}'>{sm["win_rate"]*100:.1f}%</b>
         &nbsp;Sharpe <b style='color:{portfolio.C_POS}'>{sm["sharpe"]:.2f}</b>
         &nbsp;Sortino <b style='color:{portfolio.C_POS}'>{sm["sortino"]:.2f}</b>
+        &nbsp;ROA <b style='color:{portfolio.C_POS}'>{sm["roa"]:.2f}</b>
+        &nbsp;ER <b style='color:{portfolio.C_POS}'>{sm["er"]:.2f}</b>
         &nbsp;MAR <b style='color:{portfolio.C_POS}'>{sm["mar"]:.2f}</b></span>
     </div>""", unsafe_allow_html=True)
 
@@ -688,6 +709,8 @@ def _display_ew(is_mobile, theme):
         <span>Win% <b style='color:{pos_c}'>{m["win_rate"]*100:.1f}%</b>
         &nbsp;Sharpe <b style='color:{pos_c}'>{m["sharpe"]:.2f}</b>
         &nbsp;Sortino <b style='color:{pos_c}'>{m["sortino"]:.2f}</b>
+        &nbsp;ROA <b style='color:{pos_c}'>{m["roa"]:.2f}</b>
+        &nbsp;ER <b style='color:{pos_c}'>{m["er"]:.2f}</b>
         &nbsp;MAR <b style='color:{pos_c}'>{m["mar"]:.2f}</b>
         &nbsp;Tot <b style='color:{pos_c if m["total_ret"]>=0 else neg_c}'>{m["total_ret"]*100:.1f}%</b>
         &nbsp;MDD <b style='color:{neg_c}'>{m["max_dd"]*100:.1f}%</b></span>
@@ -703,6 +726,8 @@ def _display_ew(is_mobile, theme):
             <span>Win% <b style='color:{bc}'>{b_m["win_rate"]*100:.1f}%</b>
             &nbsp;Sharpe <b style='color:{bc}'>{b_m["sharpe"]:.2f}</b>
             &nbsp;Sortino <b style='color:{bc}'>{b_m["sortino"]:.2f}</b>
+            &nbsp;ROA <b style='color:{bc}'>{b_m["roa"]:.2f}</b>
+            &nbsp;ER <b style='color:{bc}'>{b_m["er"]:.2f}</b>
             &nbsp;MAR <b style='color:{bc}'>{b_m["mar"]:.2f}</b>
             &nbsp;Tot <b style='color:{bc}'>{b_m["total_ret"]*100:.1f}%</b>
             &nbsp;MDD <b style='color:{bc}'>{b_m["max_dd"]*100:.1f}%</b>

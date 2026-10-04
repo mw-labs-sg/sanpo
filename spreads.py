@@ -8,7 +8,10 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import logging
 
-from config import FUTURES_GROUPS, SYMBOL_NAMES, FONTS, clean_symbol
+from collections import OrderedDict
+
+from config import (FUTURES_GROUPS, SYMBOL_NAMES, FONTS, clean_symbol,
+                    basket_category, sort_val)
 
 logger = logging.getLogger(__name__)
 
@@ -222,7 +225,11 @@ def fetch_sector_spread_data(sector, lookback_days=0):
     for sym in symbols:
         try:
             ticker = yf.Ticker(sym)
-            hist = ticker.history(start=start)
+            # auto_adjust pinned: yfinance has flipped this default between
+            # versions, and on a fund like MSTY -- 40 distributions totalling
+            # $12.56 on a $16 share this year -- unadjusted prices turn a
+            # Sharpe of 0.81 into 5.09. A short seller pays those payouts.
+            hist = ticker.history(start=start, auto_adjust=True)
             if not hist.empty:
                 closes = hist['Close'].copy()
                 closes.index = closes.index.tz_localize(None) if closes.index.tz else closes.index
@@ -243,16 +250,106 @@ def fetch_sector_spread_data(sector, lookback_days=0):
 # SPREAD COMPUTATION
 # =============================================================================
 
-# What Composite averages the ranks of. Sharpe is the risk-adjusted edge, ER
-# says whether the curve got there in a straight line, Win% whether it did it
-# often. MAR and R2 are shown but deliberately not ranked on: MAR pins to its
-# cap on short windows and contributes nothing but arbitrary tie-breaking, and
-# R2 measures almost the same thing ER does, so including both double-counts
-# straightness against risk.
-COMPOSITE_METRICS = ['Sharpe', 'ER', 'Win%']
+# What Composite averages the ranks of. Sharpe is the risk-adjusted edge,
+# Sortino the same edge counting only the downside, ROA the return against the
+# worst hole, ER whether the curve got there in a straight line. MAR and R2 are
+# shown but deliberately not ranked on: MAR pins to its cap on short windows and
+# contributes nothing but arbitrary tie-breaking, and R2 measures almost the
+# same thing ER does, so including both double-counts straightness.
+COMPOSITE_METRICS = ['Sharpe', 'Sortino', 'ROA', 'ER']
+
+
+# Where a metric sits when it carries no information. Shrinking pulls an
+# under-sampled estimate toward THIS point, not toward zero: 55% of bars up over
+# three months is evidence of very little, and what "very little" looks like for
+# a win rate is 50%, not 0%. Everything else here -- Sharpe, Sortino, ROA, ER,
+# MAR, R2, a total return -- is already centred on zero. The lowercase names are
+# PORTFOLIO's spelling of the same two metrics.
+NEUTRAL = {'Win%': 50.0, 'win_rate': 0.5}
+
+# Scores that are ALREADY a rank over shrunk values. Shrinking one of these a
+# second time would discount the short windows twice over.
+PRE_ADJUSTED = {'_score'}
+
+
+def _confidence(items):
+    """How much of the longest window in the set each item actually saw, as
+    sqrt(span / longest span).
+
+    Three months of history does not earn the same credit as three years at the
+    same Sharpe: the standard error of every one of these estimates falls with
+    the square root of the sample, so a short series is simply a noisier draw.
+
+    Span is measured in calendar days, not bars. Bars would penalise a crypto
+    group for printing 365 of them a year against an equity group's 252 over the
+    SAME window -- a denser sample, not a longer one. Days falls back to Bars
+    only if a caller never recorded it.
+
+    Within one basket every pair shares an index, so the factor is 1 across the
+    board and nothing moves. It bites where the windows genuinely differ -- the
+    scan ranking a group of 2024 listings against one with ten years of history.
+    """
+    span = [float(p.get('Days') or p.get('Bars') or 0) for p in items]
+    longest = max(span) if span else 0.0
+    if longest <= 0:
+        return [1.0] * len(items)
+    return [min(1.0, float(np.sqrt(sp / longest))) for sp in span]
+
+
+def length_adjusted(items, key, neutral=None):
+    """Every item's KEY shrunk toward its neutral point by _confidence.
+
+    This is what makes two rows measured over different windows comparable at
+    all, and it applies to every metric the tables rank on, not just the four
+    inside Composite: an eighteen-month basket posting the best Sharpe, MAR or
+    win rate in the set is usually the smallest sample in the set.
+
+    Values are NOT written back -- the table still shows the real Sharpe, and
+    only the order changes.
+    """
+    if key in PRE_ADJUSTED:
+        return [sort_val(p.get(key)) for p in items]
+    if neutral is None:
+        neutral = NEUTRAL.get(key, 0.0)
+    return [neutral + (sort_val(p.get(key)) - neutral) * c
+            for p, c in zip(items, _confidence(items))]
+
+
+def rank_by_length_adjusted(items, key, reverse=True):
+    """ITEMS ordered on KEY after the sample-size shrink."""
+    adj = length_adjusted(items, key)
+    order = sorted(range(len(items)), key=lambda i: adj[i], reverse=reverse)
+    return [items[i] for i in order]
+
+
+def composite_ranks(items, metrics=COMPOSITE_METRICS, score_key='_score'):
+    """Average rank across METRICS, each value shrunk for sample size first.
+
+    Mutates and returns ITEMS; lower score is better, 1.0 being the best an item
+    can score. See _confidence for what the shrink is and why.
+    """
+    n = len(items)
+    if n == 0:
+        return items
+    if n == 1:
+        items[0][score_key] = 1.0
+        return items
+    for metric in metrics:
+        vals = length_adjusted(items, metric)
+        order = sorted(range(n), key=lambda i: -vals[i])
+        for rank, idx in enumerate(order):
+            items[idx][f'_{metric}_rank'] = rank + 1
+    for p in items:
+        p[score_key] = float(np.mean([p[f'_{m}_rank'] for m in metrics]))
+    return items
 
 
 def compute_sector_spreads(data, ann_factor=252):
+    # The same metrics exist a second time, vectorised, as
+    # spreads_portfolio._window_stats -- it scores thousands of columns per
+    # rebalance, which this per-pair loop is far too slow for. They are checked
+    # to agree to three decimals on Sharpe, ROA and ER; change one and change
+    # the other.
     if data is None or len(data.columns) < 2: return []
 
     asset_sharpes = {}
@@ -261,6 +358,13 @@ def compute_sector_spreads(data, ann_factor=252):
         asset_sharpes[sym] = _spread_sharpe(ret, ann_factor)
     best_long_sym = max(asset_sharpes, key=asset_sharpes.get)
     best_long_sharpe = asset_sharpes[best_long_sym]
+
+    # Calendar span of the window, the sample-size measure composite_ranks
+    # discounts on. Constant across a basket; it separates one group from another.
+    try:
+        span_days = max(int((data.index[-1] - data.index[0]).days), 1)
+    except Exception:
+        span_days = len(data)
 
     pairs = []
     for s1, s2 in combinations(data.columns.tolist(), 2):
@@ -303,18 +407,14 @@ def compute_sector_spreads(data, ann_factor=252):
             'long': s1, 'short': s2,
             'Sharpe': sh, 'Sortino': so, 'MAR': mar, 'ROA': roa, 'ER': er, 'R²': r2_val,
             'Tot%': total, 'Ann%': ann, 'Vol%': vol, 'MDD%': mdd, 'ADD%': add,
-            'Corr': corr, 'Win%': win_rate, 'beats_long': sh > best_long_sharpe,
+            'Corr': corr, 'Win%': win_rate,
+            'Bars': len(spread_ret), 'Days': span_days,
+            'beats_long': sh > best_long_sharpe,
             'cum_long': cum1, 'cum_short': cum2, 'cum_spread': cum_sp,
         })
 
-    n = len(pairs)
-    if n == 0: return []
-    for metric in COMPOSITE_METRICS:
-        vals = [p[metric] for p in pairs]
-        order = sorted(range(n), key=lambda i: -vals[i])
-        for rank, idx in enumerate(order): pairs[idx][f'_{metric}_rank'] = rank + 1
-    for p in pairs:
-        p['_score'] = float(np.mean([p[f'_{m}_rank'] for m in COMPOSITE_METRICS]))
+    if not pairs: return []
+    composite_ranks(pairs)
     pairs.sort(key=lambda x: -x['Sharpe'])
 
     for p in pairs:
@@ -322,6 +422,258 @@ def compute_sector_spreads(data, ann_factor=252):
         p['best_long_sharpe'] = best_long_sharpe
 
     return pairs
+
+def compute_basket_singles(data, ann_factor=252, direction='Long only'):
+    """Score every symbol on its own, held long or held short.
+
+    Same metric set and the same dict shape as compute_sector_spreads, so the
+    table and the ranker do not care which one produced the rows. A spread can
+    be flipped to face the right way; an outright cannot, so the direction is
+    the user's choice and a name that fell simply scores badly when held long.
+
+    One leg is left blank: the table prints an em dash for the side that is not
+    traded.
+    """
+    if data is None or len(data.columns) < 1:
+        return []
+    short = direction == 'Short only'
+    sign = -1.0 if short else 1.0
+
+    try:
+        span_days = max(int((data.index[-1] - data.index[0]).days), 1)
+    except Exception:
+        span_days = len(data)
+
+    out = []
+    for sym in data.columns:
+        r = (data[sym].pct_change().dropna()) * sign
+        if len(r) < 5:
+            continue
+        sh = _spread_sharpe(r, ann_factor)
+        so = _spread_sortino(r, ann_factor)
+        mdd, add = _spread_drawdowns(r)
+        cum = (1 + r).cumprod()
+        total = float((cum.iloc[-1] - 1) * 100)
+        ann = float(r.mean() * ann_factor * 100)
+        vol = float(r.std() * np.sqrt(ann_factor) * 100)
+        mar = float(np.clip(ann / max(abs(add), MIN_DD_PCT), -MAX_RATIO, MAX_RATIO))
+        curve = pd.Series(100.0, index=data.index[:1])
+        curve = pd.concat([curve, 100 * (1 + r).cumprod()])
+        curve = curve[~curve.index.duplicated(keep='last')]
+        out.append({
+            'long': '' if short else sym, 'short': sym if short else '',
+            'Sharpe': sh, 'Sortino': so, 'MAR': mar,
+            'ROA': _spread_roa(r, mdd), 'ER': _spread_er(r), 'R²': _spread_r2(r),
+            'Tot%': total, 'Ann%': ann, 'Vol%': vol, 'MDD%': mdd, 'ADD%': add,
+            'Corr': float('nan'), 'Win%': float((r > 0).sum() / len(r) * 100),
+            'Bars': len(r), 'Days': span_days,
+            # Nothing to beat: the row IS the leg.
+            'beats_long': False, 'best_long_sym': '', 'best_long_sharpe': 0.0,
+            # The price goes on the side it is actually traded, so the
+            # chart colours it long or short without being told.
+            'cum_long': None if short else data[sym],
+            'cum_short': data[sym] if short else None,
+            'cum_spread': curve,
+        })
+    if not out:
+        return []
+    composite_ranks(out)
+    out.sort(key=lambda x: -x['Sharpe'])
+    return out
+
+
+# =============================================================================
+# INTERVAL FETCH
+# =============================================================================
+# Kept when the Sector tab was folded in. Measured across Futures, Crypto and
+# US Sectors, rankings at 15m/1h/4h correlate +0.90 to +1.00 with daily and
+# pick the same top spread -- so interval is for looking at the shape of a
+# move, not for deciding which spread is strongest.
+
+# yf interval, resample target, bars per trading day, max calendar days yfinance allows.
+# bars_per_day here describes a 6.5h US equity session and is only a fallback --
+# the real rate is measured off the fetched index, because futures run ~77 15m
+# bars a day and FX ~95.
+INTERVAL_CONFIG = {
+    '15m': {'yf': '15m', 'resample': None, 'bars_per_day': 26,  'max_cal_days': 59},
+    '1h':  {'yf': '1h',  'resample': None, 'bars_per_day': 7,   'max_cal_days': 729},
+    '4h':  {'yf': '1h',  'resample': '4h', 'bars_per_day': 2,   'max_cal_days': 729},
+    '1d':  {'yf': '1d',  'resample': None, 'bars_per_day': 1,   'max_cal_days': None},
+    '1wk': {'yf': '1wk', 'resample': None, 'bars_per_day': 0.2, 'max_cal_days': None},
+}
+
+# Fallback only, for when the window is too short to measure the real bar rate.
+ANN_FACTORS = {
+    '15m': 26 * 252,
+    '1h':  7 * 252,
+    '4h':  2 * 252,
+    '1d':  252,
+    '1wk': 52,
+}
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_interval_data(symbols, interval_key, lookback_days):
+    """Returns (normalised prices, annualisation factor), or (None, fallback)."""
+    cfg = INTERVAL_CONFIG[interval_key]
+    fallback_af = float(ANN_FACTORS[interval_key])
+    symbols = list(symbols or ())
+    if len(symbols) < 2:
+        return None, fallback_af
+
+    if lookback_days == 0:  # YTD
+        start = datetime.now().replace(month=1, day=1).strftime('%Y-%m-%d')
+    else:
+        cal_days = int(lookback_days * 1.6)
+        if cfg['max_cal_days']:
+            cal_days = min(cal_days, cfg['max_cal_days'])
+        start = (datetime.now() - pd.Timedelta(days=max(cal_days, 2))).strftime('%Y-%m-%d')
+
+    frames = {}
+    for sym in symbols:
+        try:
+            hist = yf.Ticker(sym).history(start=start, interval=cfg['yf'],
+                                          auto_adjust=True)
+            if hist.empty:
+                continue
+            closes = hist['Close'].copy()
+            if closes.index.tz is not None:
+                closes.index = closes.index.tz_convert('UTC').tz_localize(None)
+            if cfg.get('resample'):
+                closes = closes.resample(cfg['resample']).last().dropna()
+            if interval_key in ('1d', '1wk'):
+                closes.index = closes.index.normalize()
+                closes = closes.groupby(closes.index).last()
+            frames[sym] = closes
+        except Exception as e:
+            logger.debug(f"[{sym}] fetch error ({interval_key}): {e}")
+
+    # Shed thin columns rather than rows: one late listing used to delete every
+    # bar before it, and on intraday the intersection collapsed to whichever
+    # market trades the fewest hours.
+    data, _thin = align_frames(frames, intraday=interval_key in ('15m', '1h', '4h'))
+    if data is None or len(data.columns) < 2:
+        return None, fallback_af
+
+    # Measure the real bar rate off the full fetch, before slicing. The config
+    # constants assume a 6.5h equity session, which made 'Lookback 30 Days' mean
+    # about ten days on futures and FX.
+    bars_per_day = cfg['bars_per_day']
+    if interval_key in ('15m', '1h', '4h') and len(data) > 1:
+        sessions = max(data.index.normalize().nunique(), 1)
+        bars_per_day = max(len(data) / sessions, 0.1)
+    ann_factor = annualization_factor(data.index, fallback_af)
+
+    if lookback_days > 0:
+        bars = max(int(lookback_days * bars_per_day), 5)
+        if len(data) > bars:
+            data = data.iloc[-bars:]
+
+    if len(data) < 5:
+        return None, ann_factor
+    return 100 * (data / data.iloc[0]), ann_factor
+
+
+# =============================================================================
+# BASKET PICKER — shared by the Scan and Portfolio sub-tabs
+# =============================================================================
+
+def basket_picker(prefix, is_mobile, theme, label='Baskets in play'):
+    """Checkbox picker over every basket, one column per theme. Returns the ticked names.
+
+    PREFIX namespaces the widget keys, so two tabs can each carry their own
+    selection without stepping on one another.
+
+    Two Streamlit traps are designed around here, both found the hard way:
+
+    1. The boxes are seeded once and then their own keys ARE the state. Passing
+       value= and key= together makes the default fight the stored value on
+       every rerun.
+    2. EVERY toggle renders before ANY checkbox. Writing a checkbox's key only
+       takes effect while that widget does not yet exist in the run, and widgets
+       are created in script order -- with a theme button inside its own column,
+       the earlier columns' boxes already existed and the write was dropped: the
+       count read 18/18 while every box stayed clear.
+    """
+    _mut = theme.get('muted', '#475569')
+    accent = theme.get('accent', '#4ade80')
+    names = list(FUTURES_GROUPS.keys())
+    k = lambda n: f'{prefix}_bk_{n}'
+
+    if f'{prefix}_seeded' not in st.session_state:
+        for n in names:
+            st.session_state.setdefault(k(n), False)
+        st.session_state[f'{prefix}_seeded'] = True
+
+    by_cat = OrderedDict()
+    for n in names:
+        by_cat.setdefault(basket_category(n), []).append(n)
+    cat_names = list(by_cat.keys())
+
+    # Checkboxes appear nowhere else in the app, so this can be blunt. Streamlit
+    # gives each one a block with the global gap on top; at 58 boxes that is
+    # half a screen of air.
+    st.markdown("""<style>
+        [data-testid="stCheckbox"] { margin-bottom: -10px !important; }
+        [data-testid="stCheckbox"] label { font-size: 11px !important; }
+        [data-testid="stCheckbox"] label > div:first-child { transform: scale(0.85); }
+    </style>""", unsafe_allow_html=True)
+
+    st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+    if is_mobile:
+        c_lbl, c_all, c_none = st.columns([2, 1, 1])
+    else:
+        c_lbl, c_all, c_none, _sp = st.columns([2, 1, 1, 6])
+    with c_lbl:
+        st.markdown(f"<div style='font-size:10px;font-weight:600;letter-spacing:0.08em;"
+                    f"text-transform:uppercase;color:#cbd5e1;font-family:{FONTS};"
+                    f"padding:11px 0 0 2px'>{label}</div>", unsafe_allow_html=True)
+    with c_all:
+        tick_all = st.button('Select all', key=f'{prefix}_all', use_container_width=True,
+                             help=f'Tick all {len(names)} baskets.')
+    with c_none:
+        tick_none = st.button('Clear', key=f'{prefix}_none', use_container_width=True,
+                              help='Untick everything.')
+    if tick_all or tick_none:
+        for n in names:
+            st.session_state[k(n)] = bool(tick_all)
+
+    per_row = 2 if is_mobile else len(cat_names)
+    for start in range(0, len(cat_names), per_row):
+        chunk = cat_names[start:start + per_row]
+        # strict=False on purpose: the final row can hold fewer themes than
+        # columns, and the spare columns are meant to stay empty.
+        for col, cat in zip(st.columns(per_row), chunk, strict=False):
+            members = by_cat[cat]
+            full = all(st.session_state.get(k(n)) for n in members)
+            with col:
+                # Label is the theme alone: a count baked into it is one
+                # interaction stale, because the label is emitted before the
+                # click that changes it is processed.
+                if st.button(cat, key=f'{prefix}_cat_{cat}', use_container_width=True,
+                             help=f'{"Untick" if full else "Tick"} all '
+                                  f'{len(members)} {cat} baskets.'):
+                    for n in members:
+                        st.session_state[k(n)] = not full
+        for col, cat in zip(st.columns(per_row), chunk, strict=False):
+            members = by_cat[cat]
+            on_now = sum(1 for n in members if st.session_state.get(k(n)))
+            with col:
+                # The checkbox rule below pulls each box up by 10px, which ate
+                # into this line; the margin puts the air back under it.
+                st.markdown(
+                    f"<div style='font-size:9px;letter-spacing:0.06em;color:"
+                    f"{accent if on_now else _mut};font-family:{FONTS};"
+                    f"line-height:1.6;margin:2px 0 10px 2px'>"
+                    f"{on_now}/{len(members)} ticked</div>",
+                    unsafe_allow_html=True)
+                for name in members:
+                    st.session_state.setdefault(k(name), False)
+                    st.checkbox(f"{name} ({len(FUTURES_GROUPS[name])})", key=k(name))
+
+    st.markdown(f"<div style='height:1px;background:{theme.get('border', '#1e293b')};"
+                f"margin:14px 0 2px 0'></div>", unsafe_allow_html=True)
+    return [n for n in names if st.session_state.get(k(n))]
+
 
 # =============================================================================
 # SORTING
@@ -335,10 +687,17 @@ SORT_KEYS = {
 SORT_OPTIONS = list(SORT_KEYS.keys())
 
 def sort_spread_pairs(pairs, sort_key='Composite', ascending=False):
+    """Rank on the length-adjusted value, whichever metric is chosen.
+
+    Within one basket every pair shares a window and this is an ordinary sort.
+    Across baskets it is not: a pair out of a basket with eighteen months of
+    history is shrunk back toward the uninformative value before it is compared
+    with one that has ten years.
+    """
     key = SORT_KEYS.get(sort_key, sort_key)
     default_reverse = (key != '_score')
     reverse = not default_reverse if ascending else default_reverse
-    return sorted(pairs, key=lambda x: x.get(key, 0), reverse=reverse)
+    return rank_by_length_adjusted(pairs, key, reverse)
 
 # =============================================================================
 # SHARED TABLE RENDERER
@@ -357,7 +716,7 @@ def render_spread_table(pairs, theme, top_n=10):
             <th style='{th}text-align:left'>RANK</th>
             <th style='{th}text-align:left'>LONG</th>
             <th style='{th}text-align:left'>SHORT</th>
-            <th style='{th}text-align:right'>SCORE</th>
+            <th style='{th}text-align:right'>COMPOSITE</th>
             <th style='{th}text-align:right'>SHARPE</th>
             <th style='{th}text-align:right'>SORTINO</th>
             <th style='{th}text-align:right'>ROA</th>
@@ -488,8 +847,8 @@ def render_spread_charts(pairs, data, theme, mobile=False):
 # =============================================================================
 
 def render_spreads_tab(is_mobile):
-    from spreads_sector import render_sector_tab
     from spreads_scan import render_scan_tab
+    from spreads_portfolio import render_spread_portfolio_tab
 
     # Green underline on nested sub-tabs only (inside a tab panel)
     st.markdown(f"""<style>
@@ -524,10 +883,16 @@ def render_spreads_tab(is_mobile):
         .stTextInput input {{ font-family: {FONTS} !important; font-size: 13px !important; letter-spacing: 0.01em !important; }}
     </style>""", unsafe_allow_html=True)
 
-    tab_sector, tab_scan = st.tabs(['Sector', 'All'])
+    # Two sub-tabs, not three. 'Sector' and 'All' were the same computation
+    # over different scopes, and the scope is now a checkbox list with a RANK
+    # control: tick one basket and rank its pairs, and that IS the old Sector
+    # view. The old tab's Interval control went with it -- measured across
+    # Futures, Crypto and US Sectors, rankings at 15m/1h/4h correlate +0.90 to
+    # +1.00 with daily and pick the same top spread, for ~90x the bars.
+    tab_sector, tab_port = st.tabs(['Sector', 'Portfolio'])
 
     with tab_sector:
-        render_sector_tab(is_mobile)
-
-    with tab_scan:
         render_scan_tab(is_mobile)
+
+    with tab_port:
+        render_spread_portfolio_tab(is_mobile)

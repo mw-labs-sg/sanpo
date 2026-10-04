@@ -1,18 +1,28 @@
 import streamlit as st
-import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import logging
 
 from config import FUTURES_GROUPS, THEMES, SYMBOL_NAMES, FONTS, clean_symbol
-from spreads import (LOOKBACK_OPTIONS, fetch_sector_spread_data,
-                     compute_sector_spreads, annualization_factor)
+from spreads import (LOOKBACK_OPTIONS, INTERVAL_CONFIG, fetch_sector_spread_data,
+                     fetch_interval_data, compute_sector_spreads,
+                     compute_basket_singles, annualization_factor,
+                     composite_ranks, sort_spread_pairs, basket_picker,
+                     rank_by_length_adjusted)
 
 logger = logging.getLogger(__name__)
 
 # =============================================================================
 # SORT CONFIG
 # =============================================================================
+
+# What gets ranked inside the ticked scope.
+RANK_MODES = ['Best per basket', 'All pairs']
+
+# Spreads are pairs; the other two rank the outright names. A spread can be
+# flipped to face the right way, an outright cannot, so the direction is chosen
+# here rather than inferred.
+TRADE_MODES = ['Spreads', 'Long only', 'Short only']
 
 SCAN_SORT_KEYS = {
     'Composite': ('_score', False),
@@ -26,9 +36,6 @@ SCAN_SORT_KEYS = {
     'Win Rate': ('Win%', True),
 }
 
-# Must match spreads.COMPOSITE_METRICS -- the scan re-ranks globally across
-# groups, so it has to average the same metrics the per-sector view does.
-SCAN_COMPOSITE = ['Sharpe', 'ER', 'Win%']
 
 # =============================================================================
 # MAIN RENDER
@@ -37,47 +44,114 @@ SCAN_COMPOSITE = ['Sharpe', 'ER', 'Win%']
 def render_scan_tab(is_mobile):
     theme_name = st.session_state.get('theme', 'Dark')
     theme = THEMES.get(theme_name, THEMES['Dark'])
-    _bg3 = theme.get('bg3', '#0f172a'); _mut = theme.get('muted', '#475569')
+    _mut = theme.get('muted', '#475569')
     ann_factor = 252
 
-    # Controls: Lookback + Sort + Scan button
-    if is_mobile:
-        col_lb, col_sort = st.columns([1, 1])
-    else:
-        col_lb, col_sort, col_btn = st.columns([3, 3, 2])
+    # Scope is ticked, not typed. Sector and All were the same computation over
+    # different scopes -- one basket, or every basket -- so the scope is a
+    # checkbox list and RANK says what gets ranked within it. Tick one basket
+    # and rank its pairs, and this is the old Sector tab.
+    picked = basket_picker('sc', is_mobile, theme, label='Baskets to scan')
 
-    with col_lb:
+    # One narrow column of inputs, each with its own label above it. The
+    # previous label-left/input-right split needed hand-built markdown for the
+    # labels, and that markdown is what the Scan button kept riding over.
+    if is_mobile:
+        col_in = st.container()
+    else:
+        col_in, _col_rest = st.columns([2, 5])
+
+    with col_in:
+        trade = st.selectbox("Trade", TRADE_MODES,
+            index=TRADE_MODES.index('Long only'), key='scan_trade_sel',
+            help='Spreads ranks every pair, long one leg against the other. '
+                 'Long only and Short only rank the outright names instead, so '
+                 'the candidates are symbols and only one side is traded.')
+        iv_keys = list(INTERVAL_CONFIG.keys())
+        interval = st.selectbox("Interval", iv_keys, index=iv_keys.index('1d'),
+            key='scan_interval_sel',
+            help='Bar size everything is measured on. Intraday reaches back only '
+                 'so far: 15m to 60 days, 1h and 4h to 730. It changes the shape '
+                 'you see more than the ranking — measured across Futures, Crypto '
+                 'and US Sectors, 15m/1h/4h rank +0.90 to +1.00 with daily and '
+                 'pick the same leader.')
         lookback_label = st.selectbox("Lookback", list(LOOKBACK_OPTIONS.keys()), index=0,
             key='scan_lookback_sel',
-            help='How far back to score the spreads, in trading days.')
+            help='How far back to score, in trading days.')
         lookback_days = LOOKBACK_OPTIONS[lookback_label]
-    with col_sort:
-        scan_sort = st.selectbox("Sort by", list(SCAN_SORT_KEYS.keys()), index=0,
+        scan_sort = st.selectbox("Optimize by", list(SCAN_SORT_KEYS.keys()), index=0,
             key='scan_sort_sel',
-            help='Which metric ranks the groups. Composite is the average rank across '
-                 'Sharpe, ER and Win%.')
+            help='Not just a sort: it chooses what you see as well as the order. '
+                 'Composite is the average rank across Sharpe, Sortino, ROA and '
+                 'ER. Every metric here, Composite included, is discounted by the '
+                 'square root of the window length before it is ranked, so a short '
+                 'history cannot win on a small sample. The columns still show the '
+                 'real numbers \u2014 only the order is adjusted.')
+        rank_mode = st.selectbox("Rank", RANK_MODES, index=0, key='scan_rank_sel',
+            help='Best per basket gives each ticked basket one row — its own '
+                 'strongest candidate — so a 465-pair basket cannot crowd out a '
+                 '6-pair one. All pairs pools everything from every ticked '
+                 'basket and ranks it together; tick a single basket and that '
+                 'is its internal ranking.')
 
-    if is_mobile:
-        scan_clicked = st.button('▶  Scan All', key='spread_scan_all', type='primary')
-    else:
-        with col_btn:
-            # Blank label, so the button lines up with the two selectboxes.
-            st.markdown("<div style='height:22px'></div>", unsafe_allow_html=True)
-            scan_clicked = st.button('▶  Scan All', key='spread_scan_all', type='primary')
+        # Padding, not margin: a margin on the inner div collapses out of
+        # Streamlit's block, so the button measured 4px ABOVE this line and sat
+        # on top of it.
+        n_sym = sum(len(FUTURES_GROUPS[g]) for g in picked)
+        st.markdown(f"<div style='font-size:10px;color:{_mut};font-family:{FONTS};"
+                    f"line-height:1.6;padding:14px 0 22px 2px'>{len(picked)} baskets · "
+                    f"{n_sym:,} symbols</div>", unsafe_allow_html=True)
+        scan_clicked = st.button('▶  Scan', key='spread_scan_all', type='primary',
+                                 use_container_width=True)
 
     if scan_clicked:
-        _run_scan_all(lookback_days, lookback_label, ann_factor, theme, scan_sort, is_mobile)
-    elif 'spread_scan_results' in st.session_state:
-        _render_scan_all(st.session_state.spread_scan_results, theme, scan_sort,
-                         lookback_days, ann_factor, is_mobile)
+        if not picked:
+            st.markdown(f"<div style='padding:12px;color:{_mut};font-size:11px;"
+                        f"font-family:{FONTS}'>No baskets ticked — nothing to scan.</div>",
+                        unsafe_allow_html=True)
+            return
+        _run_scan_all(tuple(picked), lookback_days, lookback_label, ann_factor,
+                      theme, scan_sort, rank_mode, is_mobile, interval, trade)
+    elif 'spread_scan_pairs' in st.session_state:
+        # Cached from the last scan. Every pair of every basket is kept, so
+        # Optimize by and Rank both re-pick without a refetch.
+        _render_scan_all(st.session_state.spread_scan_pairs, theme, scan_sort,
+                         lookback_days, ann_factor, is_mobile, rank_mode)
 
 # =============================================================================
 # SCAN ENGINE
 # =============================================================================
 
-def _run_scan_all(lookback_days, lookback_label, ann_factor, theme, scan_sort, is_mobile):
-    all_top = []
-    groups = list(FUTURES_GROUPS.items())
+def _basket_candidates(gname, interval, lookback_days, ann_factor, trade):
+    """(candidates, price frame) for one basket: pairs, or the outright names.
+
+    The frame comes back too because the charts date their x-axis off it.
+    """
+    if interval == '1d':
+        data = fetch_sector_spread_data(gname, lookback_days)
+        af = annualization_factor(data.index, ann_factor) if data is not None else ann_factor
+    else:
+        data, af = fetch_interval_data(tuple(FUTURES_GROUPS.get(gname, ())),
+                                       interval, lookback_days)
+    if data is None or data.empty:
+        return None, None
+    if trade == 'Spreads':
+        if len(data.columns) < 2:
+            return None, None
+        return compute_sector_spreads(data, af), data
+    return compute_basket_singles(data, af, trade), data
+
+def _run_scan_all(picked, lookback_days, lookback_label, ann_factor, theme,
+                  scan_sort, rank_mode, is_mobile, interval='1d', trade='Spreads'):
+    """Score every pair of every group, and keep them all.
+
+    The scan used to store one pair per group, picked on Composite. Sort by then
+    could only reorder those, so asking for ROA got the composite-best pair
+    ranked by ROA rather than the group's best ROA pair. Keeping every pair lets
+    the pick follow Sort by, and lets it change without a refetch.
+    """
+    by_group = {}
+    groups = [(g, FUTURES_GROUPS[g]) for g in picked if g in FUTURES_GROUPS]
     progress = st.progress(0, text='Scanning groups...')
 
     for i, (gname, syms) in enumerate(groups):
@@ -85,57 +159,65 @@ def _run_scan_all(lookback_days, lookback_label, ann_factor, theme, scan_sort, i
         if len(syms) < 2:
             continue
         try:
-            data = fetch_sector_spread_data(gname, lookback_days)
-            if data is None or len(data.columns) < 2:
-                continue
             # Per group: a crypto group prints 365 bars a year, an equity one 252.
-            pairs = compute_sector_spreads(data, annualization_factor(data.index, ann_factor))
+            pairs, _frame = _basket_candidates(gname, interval, lookback_days,
+                                               ann_factor, trade)
             if not pairs:
                 continue
-            pairs.sort(key=lambda x: x.get('_score', 999))
-            top = pairs[0]
-            all_top.append({
-                'group': gname,
-                'long': top['long'], 'short': top['short'],
-                'Sharpe': top['Sharpe'], 'Sortino': top['Sortino'],
-                'ROA': top['ROA'], 'ER': top['ER'],
-                'MAR': top['MAR'], 'R²': top['R²'], 'Win%': top['Win%'],
-                'Tot%': top['Tot%'], 'Vol%': top['Vol%'],
-                'MDD%': top['MDD%'], 'Corr': top['Corr'],
-                '_score': top['_score'],
-            })
+            # The cum_* curves are the heavy part and the charts refetch anyway.
+            slim = []
+            for p in pairs:
+                row = {k: v for k, v in p.items() if not k.startswith('cum_')}
+                row['group'] = gname
+                slim.append(row)
+            by_group[gname] = slim
         except Exception as e:
             logger.warning(f"Scan error for {gname}: {e}")
 
     progress.empty()
 
-    if not all_top:
+    if not by_group:
         st.warning('No valid spreads found across groups')
         return
 
-    # Recompute global ranks
-    n = len(all_top)
-    if n > 1:
-        for metric in SCAN_COMPOSITE:
-            vals = [p[metric] for p in all_top]
-            order = sorted(range(n), key=lambda i: -vals[i])
-            for rank, idx in enumerate(order):
-                all_top[idx][f'_{metric}_rank'] = rank + 1
-        for p in all_top:
-            p['_score'] = float(np.mean([p[f'_{m}_rank'] for m in SCAN_COMPOSITE]))
-    else:
-        all_top[0]['_score'] = 1.0
-
-    st.session_state.spread_scan_results = all_top
-    _render_scan_all(all_top, theme, scan_sort, lookback_days, ann_factor, is_mobile)
+    st.session_state.spread_scan_pairs = by_group
+    st.session_state.spread_scan_ctx = {'interval': interval, 'trade': trade}
+    _render_scan_all(by_group, theme, scan_sort, lookback_days, ann_factor,
+                     is_mobile, rank_mode)
 
 # =============================================================================
 # RENDER RESULTS
 # =============================================================================
 
-def _render_scan_all(all_top, theme, scan_sort, lookback_days, ann_factor, is_mobile):
+def _pick_tops(by_group, scan_sort, rank_mode='Best per basket', top_n=25):
+    """One representative pair per group, chosen on the sort metric.
+
+    Each pick is a copy, so the group's own Composite -- ranked against its
+    siblings -- survives in the cache for the next re-pick, while the copies get
+    a fresh Composite ranked across groups.
+    """
+    if rank_mode == 'All pairs':
+        # Every pair of every ticked basket, ranked against each other. With a
+        # single basket ticked this is exactly the old Sector ranking.
+        pool = [p for pairs in by_group.values() for p in pairs]
+        tops = [dict(p) for p in sort_spread_pairs(pool, scan_sort)[:top_n]]
+    else:
+        tops = []
+        for pairs in by_group.values():
+            if not pairs:
+                continue
+            tops.append(dict(sort_spread_pairs(pairs, scan_sort)[0]))
+    composite_ranks(tops)
+    return tops
+
+
+def _render_scan_all(by_group, theme, scan_sort, lookback_days, ann_factor,
+                     is_mobile, rank_mode='Best per basket'):
+    tops = _pick_tops(by_group, scan_sort, rank_mode)
     key, reverse = SCAN_SORT_KEYS.get(scan_sort, ('_score', False))
-    sorted_results = sorted(all_top, key=lambda x: x.get(key, 0), reverse=reverse)
+    # Rows here come from baskets with genuinely different histories, so the
+    # order is taken on the length-adjusted value whatever metric is chosen.
+    sorted_results = rank_by_length_adjusted(tops, key, reverse)
 
     _render_scan_table(sorted_results, theme)
     _render_scan_charts(sorted_results, lookback_days, ann_factor, theme, is_mobile)
@@ -150,7 +232,10 @@ def _render_scan_table(sorted_results, theme):
     _txt = theme.get('text', '#e2e8f0'); _txt2 = theme.get('text2', '#94a3b8')
     _mut = theme.get('muted', '#475569')
     th = f"padding:4px 8px;border-bottom:1px solid {_bdr};color:#f8fafc;font-weight:600;font-size:9px;text-transform:uppercase;letter-spacing:0.06em;"
-    td = f"padding:5px 8px;border-bottom:1px solid {_bdr}22;"
+    # Every row one line: 'MSTR Options Income' used to wrap a row to three
+    # lines and 'Cell Therapy / In-Vivo CAR-T' to two, which broke the scan.
+    td = (f"padding:5px 8px;border-bottom:1px solid {_bdr}22;white-space:nowrap;"
+          f"overflow:hidden;text-overflow:ellipsis;max-width:150px;")
 
     html = f"""<div style='overflow-x:auto;border:1px solid {_bdr};border-radius:6px;margin-top:8px'>
     <table style='border-collapse:collapse;font-family:{FONTS};font-size:11px;width:100%;line-height:1.3'>
@@ -159,7 +244,7 @@ def _render_scan_table(sorted_results, theme):
             <th style='{th}text-align:left'>GROUP</th>
             <th style='{th}text-align:left'>LONG</th>
             <th style='{th}text-align:left'>SHORT</th>
-            <th style='{th}text-align:right'>SCORE</th>
+            <th style='{th}text-align:right'>COMPOSITE</th>
             <th style='{th}text-align:right'>SHARPE</th>
             <th style='{th}text-align:right'>SORTINO</th>
             <th style='{th}text-align:right'>ROA</th>
@@ -171,11 +256,16 @@ def _render_scan_table(sorted_results, theme):
             <th style='{th}text-align:right'>VOL%</th>
             <th style='{th}text-align:right'>MDD%</th>
             <th style='{th}text-align:right'>CORR</th>
+            <th style='{th}text-align:right'>DAYS</th>
+            <th style='{th}text-align:center'>vs LONG</th>
         </tr></thead><tbody>"""
 
     for rank, p in enumerate(sorted_results, 1):
-        ln = SYMBOL_NAMES.get(p['long'], clean_symbol(p['long']))
-        sn = SYMBOL_NAMES.get(p['short'], clean_symbol(p['short']))
+        # An outright trades one side only; the other prints a dash.
+        ln = (SYMBOL_NAMES.get(p['long'], clean_symbol(p['long']))
+              if p['long'] else '&mdash;')
+        sn = (SYMBOL_NAMES.get(p['short'], clean_symbol(p['short']))
+              if p['short'] else '&mdash;')
         sh_c = pos_c if p['Sharpe'] >= 0 else neg_c
         tot_c = pos_c if p['Tot%'] >= 0 else neg_c
         tot_s = '+' if p['Tot%'] >= 0 else ''
@@ -186,15 +276,26 @@ def _render_scan_table(sorted_results, theme):
         roa_c = pos_c if _roa >= 3 else (_mut if _roa <= 0 else _txt2)
         score = p.get('_score', 0)
         sc_c = pos_c if score <= 3 else (_txt2 if score <= 6 else _mut)
+        # An outright has no second leg to correlate against.
+        _corr = p.get('Corr', float('nan'))
+        corr_s = '&mdash;' if _corr != _corr else f'{_corr:.2f}'
         is_top3 = rank <= 3
-        bg = 'rgba(74,222,128,0.06)' if is_top3 else 'transparent'
+        # Same marker the sector table carries: did the spread beat simply being
+        # long the best single leg in its group?
+        beats = p.get('beats_long', False)
+        vs = (f"<span style='color:{pos_c};font-weight:700'>&#9650;</span>" if beats
+              else f"<span style='color:{_mut}'>&mdash;</span>")
+        if beats:
+            bg = f'linear-gradient(90deg,{pos_c}08,{_bg3},{pos_c}08)'
+        else:
+            bg = 'rgba(74,222,128,0.06)' if is_top3 else 'transparent'
         fw = '700' if is_top3 else '500'
         gc = pos_c if is_top3 else _txt
         html += f"""<tr style='background:{bg}'>
             <td style='{td}color:{_mut}'>{rank}</td>
-            <td style='{td}color:{gc};font-weight:{fw}'>{p['group']}</td>
-            <td style='{td}color:{pos_c};font-weight:600'>{ln}</td>
-            <td style='{td}color:{short_c};font-weight:600'>{sn}</td>
+            <td style='{td}color:{gc};font-weight:{fw}' title='{p['group']}'>{p['group']}</td>
+            <td style='{td}color:{pos_c};font-weight:600' title='{ln}'>{ln}</td>
+            <td style='{td}color:{short_c};font-weight:600' title='{sn}'>{sn}</td>
             <td style='{td}text-align:right;color:{sc_c};font-weight:600'>{score:.1f}</td>
             <td style='{td}text-align:right'><span style='color:{sh_c};font-weight:700'>{p["Sharpe"]:.2f}</span></td>
             <td style='{td}text-align:right;color:{_txt2}'>{p["Sortino"]:.2f}</td>
@@ -206,7 +307,9 @@ def _render_scan_table(sorted_results, theme):
             <td style='{td}text-align:right'><span style='color:{tot_c};font-weight:600'>{tot_s}{p["Tot%"]:.1f}%</span></td>
             <td style='{td}text-align:right;color:{_txt2}'>{p["Vol%"]:.1f}%</td>
             <td style='{td}text-align:right;color:{neg_c}'>{p["MDD%"]:.1f}%</td>
-            <td style='{td}text-align:right;color:{_txt2}'>{p["Corr"]:.2f}</td>
+            <td style='{td}text-align:right;color:{_txt2}'>{corr_s}</td>
+            <td style='{td}text-align:right;color:{_mut}'>{p.get("Days", 0)}</td>
+            <td style='{td}text-align:center'>{vs}</td>
         </tr>"""
 
     html += "</tbody></table></div>"
@@ -217,20 +320,26 @@ def _render_scan_table(sorted_results, theme):
 # =============================================================================
 
 def _render_scan_charts(sorted_results, lookback_days, ann_factor, theme, is_mobile):
+    ctx = st.session_state.get('spread_scan_ctx', {})
+    interval = ctx.get('interval', '1d')
+    trade = ctx.get('trade', 'Spreads')
     if not sorted_results:
         return
 
     chart_pairs = []
     for r in sorted_results:
         try:
-            data = fetch_sector_spread_data(r['group'], lookback_days)
-            if data is None or len(data.columns) < 2:
+            pairs, data = _basket_candidates(r['group'], interval, lookback_days,
+                                             ann_factor, trade)
+            if not pairs or data is None:
                 continue
-            pairs = compute_sector_spreads(data, annualization_factor(data.index, ann_factor))
-            if not pairs:
-                continue
-            pairs.sort(key=lambda x: x.get('_score', 999))
-            top = pairs[0]
+            # Match the row's legs: once Sort by drives the pick, re-choosing
+            # on Composite here would chart a different pair than the table.
+            top = next((q for q in pairs
+                        if q['long'] == r['long'] and q['short'] == r['short']), None)
+            if top is None:
+                pairs.sort(key=lambda x: x.get('_score', 999))
+                top = pairs[0]
             top['_group'] = r['group']
             chart_pairs.append({'pair': top, 'data': data})
         except Exception:
@@ -253,14 +362,24 @@ def _render_scan_charts(sorted_results, lookback_days, ann_factor, theme, is_mob
         subtitles = []
         for cp in batch:
             p = cp['pair']; g = p.get('_group', '')
-            ln = SYMBOL_NAMES.get(p['long'], clean_symbol(p['long']))
-            sn = SYMBOL_NAMES.get(p['short'], clean_symbol(p['short']))
+            ln = (SYMBOL_NAMES.get(p['long'], clean_symbol(p['long']))
+                  if p['long'] else '')
+            sn = (SYMBOL_NAMES.get(p['short'], clean_symbol(p['short']))
+                  if p['short'] else '')
             lc = theme['long']; sc = theme['short']
-            subtitles.append(
-                f"<b>{g}</b>  <span style='color:{lc}'>■</span> {ln}  "
-                f"<span style='color:{sc}'>■</span> {sn}  "
-                f"<span style='color:#ffffff'>■</span> Spread"
-            )
+            if ln and sn:
+                subtitles.append(
+                    f"<b>{g}</b>  <span style='color:{lc}'>■</span> {ln}  "
+                    f"<span style='color:{sc}'>■</span> {sn}  "
+                    f"<span style='color:#ffffff'>■</span> Spread")
+            else:
+                # An outright: one leg, and the dotted line is the position
+                # itself -- inverted already when it is held short.
+                side = 'Long' if ln else 'Short'
+                col_ = lc if ln else sc
+                subtitles.append(
+                    f"<b>{g}</b>  <span style='color:{col_}'>■</span> {ln or sn}  "
+                    f"<span style='color:#ffffff'>■</span> {side}")
         while len(subtitles) < n_rows * n_cols:
             subtitles.append("")
 
@@ -271,12 +390,15 @@ def _render_scan_charts(sorted_results, lookback_days, ann_factor, theme, is_mob
             p = cp['pair']; data = cp['data']
             row = i // n_cols + 1; col = i % n_cols + 1
 
-            fig.add_trace(go.Scatter(x=list(range(len(p['cum_long']))), y=p['cum_long'].values,
-                mode='lines', line=dict(color=theme['long'], width=1.3, shape='spline', smoothing=1.0),
-                showlegend=False, hovertemplate='Long: %{y:.1f}<extra></extra>'), row=row, col=col)
-            fig.add_trace(go.Scatter(x=list(range(len(p['cum_short']))), y=p['cum_short'].values,
-                mode='lines', line=dict(color=theme['short'], width=1.3, shape='spline', smoothing=1.0),
-                showlegend=False, hovertemplate='Short: %{y:.1f}<extra></extra>'), row=row, col=col)
+            # Legs the trade actually has. An outright carries one.
+            if p.get('cum_long') is not None:
+                fig.add_trace(go.Scatter(x=list(range(len(p['cum_long']))), y=p['cum_long'].values,
+                    mode='lines', line=dict(color=theme['long'], width=1.3, shape='spline', smoothing=1.0),
+                    showlegend=False, hovertemplate='Long: %{y:.1f}<extra></extra>'), row=row, col=col)
+            if p.get('cum_short') is not None:
+                fig.add_trace(go.Scatter(x=list(range(len(p['cum_short']))), y=p['cum_short'].values,
+                    mode='lines', line=dict(color=theme['short'], width=1.3, shape='spline', smoothing=1.0),
+                    showlegend=False, hovertemplate='Short: %{y:.1f}<extra></extra>'), row=row, col=col)
             fig.add_trace(go.Scatter(x=list(range(len(p['cum_spread']))), y=p['cum_spread'].values,
                 mode='lines', line=dict(color='#ffffff', width=1.5, dash='dot', shape='spline', smoothing=1.0),
                 showlegend=False, hovertemplate='Spread: %{y:.1f}<extra></extra>'), row=row, col=col)

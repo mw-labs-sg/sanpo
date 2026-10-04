@@ -1335,6 +1335,12 @@ def render_charts_tab(is_mobile, est):
     t = get_theme()
     pos_c = t['pos']
 
+    # A basket deleted on the BASKETS tab can leave `sector` naming a group that
+    # no longer exists; fall back rather than KeyError on the lookup below.
+    if st.session_state.sector != 'Custom' and st.session_state.sector not in FUTURES_GROUPS:
+        st.session_state.sector = next(iter(FUTURES_GROUPS))
+        st.session_state.symbol = FUTURES_GROUPS[st.session_state.sector][0]
+
     # Determine if we're in Custom mode
     _is_custom = (st.session_state.sector == 'Custom')
 
@@ -1957,6 +1963,9 @@ def render_scanner_charts_tab(is_mobile, est):
         st.session_state.symbol = FUTURES_GROUPS[new_sector][0]
 
     sector_names = list(FUTURES_GROUPS.keys())
+    # Same guard as the chart tab: a deleted basket must not strand the selectbox.
+    if st.session_state.sector not in sector_names:
+        st.session_state.sector = sector_names[0]
     if st.session_state.get('sc_sector') != st.session_state.sector:
         st.session_state.sc_sector = st.session_state.sector
 

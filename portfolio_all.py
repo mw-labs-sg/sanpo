@@ -6,20 +6,32 @@ from plotly.subplots import make_subplots
 import logging
 
 from config import FUTURES_GROUPS, THEMES, FONTS
-from portfolio import (REBAL_OPTIONS, PERIOD_OPTIONS, SCORE_TO_RANK,
-                       fetch_symbol_history, _calc_oos_metrics,
-                       run_walkforward_grid, run_fullsample, _section)
+from portfolio import (REBAL_OPTIONS, PERIOD_OPTIONS, SCORE_TO_RANK, OBJECTIVES,
+                       fetch_symbol_history, _calc_oos_metrics, composite_ranks,
+                       best_approach, rank_rows, run_walkforward_grid, run_fullsample,
+                       _section)
+# Same checkbox list as SPREADS and as the Single sub-tab, so a basket means the
+# same thing on every tab that ranks one.
+from spreads import basket_picker
 
 logger = logging.getLogger(__name__)
+
+# Above this, the first run spends most of its time in yfinance rather than in
+# the optimiser, so say so before the click rather than after.
+BUSY_BASKETS = 10
 
 # =============================================================================
 # SORT CONFIG
 # =============================================================================
 
 SCAN_SORT_KEYS = {
+    # Composite is a mean rank, so 1.0 wins and it sorts the other way.
+    'Composite': ('_score', False),
     'Win Rate': ('win_rate', True),
     'Sharpe': ('sharpe', True),
     'Sortino': ('sortino', True),
+    'ROA': ('roa', True),
+    'ER': ('er', True),
     'MAR': ('mar', True),
     'R²': ('r2', True),
     'Total Return': ('total_ret', True),
@@ -67,10 +79,10 @@ def _compute_ew_returns(symbols, fetch_days, rebal_months, txn_cost):
     return ew_series, valid
 
 
-def _run_ew_scan(period_days, rebal_months, txn_cost, rank_by, progress_bar=None):
-    """Scan all groups with equal-weight returns."""
+def _run_ew_scan(picked, period_days, rebal_months, txn_cost, rank_by, progress_bar=None):
+    """Scan the ticked baskets with equal-weight returns."""
     all_results = []
-    groups = list(FUTURES_GROUPS.items())
+    groups = [(g, FUTURES_GROUPS[g]) for g in picked if g in FUTURES_GROUPS]
 
     for i, (gname, syms) in enumerate(groups):
         if progress_bar:
@@ -102,12 +114,12 @@ def _run_ew_scan(period_days, rebal_months, txn_cost, rank_by, progress_bar=None
 # MC SCAN
 # =============================================================================
 
-def _run_mc_scan(period_days, rebal_months, txn_cost, score_type, n_sims,
+def _run_mc_scan(picked, period_days, rebal_months, txn_cost, score_type, n_sims,
                  max_wt, min_wt, allow_short, max_vol, min_ann_ret,
                  rank_by, progress_bar=None):
-    """Scan all groups with Monte Carlo walk-forward optimization."""
+    """Scan the ticked baskets with Monte Carlo walk-forward optimization."""
     all_results = []
-    groups = list(FUTURES_GROUPS.items())
+    groups = [(g, FUTURES_GROUPS[g]) for g in picked if g in FUTURES_GROUPS]
 
     for i, (gname, syms) in enumerate(groups):
         if progress_bar:
@@ -125,8 +137,7 @@ def _run_mc_scan(period_days, rebal_months, txn_cost, score_type, n_sims,
                 continue
             # Pick best approach by rank metric
             rank_metric = SCORE_TO_RANK.get(score_type, 'win_rate')
-            best_name = max(grid['results'].keys(),
-                           key=lambda k: grid['results'][k]['metrics'].get(rank_metric, 0))
+            best_name = best_approach(grid['results'], rank_metric)
             best = grid['results'][best_name]
             m = best['metrics']
             m['group'] = gname
@@ -154,12 +165,12 @@ def _run_mc_scan(period_days, rebal_months, txn_cost, score_type, n_sims,
 # FULL SAMPLE SCAN
 # =============================================================================
 
-def _run_fs_scan(period_days, rebal_months, txn_cost, score_type, n_sims,
+def _run_fs_scan(picked, period_days, rebal_months, txn_cost, score_type, n_sims,
                  max_wt, min_wt, allow_short, max_vol, min_ann_ret,
                  rank_by, progress_bar=None):
-    """Scan all groups with Monte Carlo full-sample (in-sample) optimization."""
+    """Scan the ticked baskets with Monte Carlo full-sample (in-sample) optimization."""
     all_results = []
-    groups = list(FUTURES_GROUPS.items())
+    groups = [(g, FUTURES_GROUPS[g]) for g in picked if g in FUTURES_GROUPS]
 
     for i, (gname, syms) in enumerate(groups):
         if progress_bar:
@@ -177,8 +188,7 @@ def _run_fs_scan(period_days, rebal_months, txn_cost, score_type, n_sims,
                 continue
             # Pick best approach by rank metric
             rank_metric = SCORE_TO_RANK.get(score_type, 'win_rate')
-            best_name = max(grid['results'].keys(),
-                           key=lambda k: grid['results'][k]['metrics'].get(rank_metric, 0))
+            best_name = best_approach(grid['results'], rank_metric)
             best = grid['results'][best_name]
             m = best['metrics']
             m['group'] = gname
@@ -205,12 +215,35 @@ def _run_fs_scan(period_days, rebal_months, txn_cost, score_type, n_sims,
 # MAIN RENDER
 # =============================================================================
 
+def _nothing_ran(picked):
+    """Why a scan came back empty. A one-symbol basket is not a portfolio and
+    every scan skips it, which is worth saying out loud when that is all that
+    was ticked."""
+    thin = [g for g in picked if len(FUTURES_GROUPS.get(g, [])) < 2]
+    if picked and len(thin) == len(picked):
+        return (f"Nothing to optimise: {'that basket holds' if len(picked) == 1 else 'those baskets hold'} "
+                f"fewer than 2 symbols. A portfolio needs at least two.")
+    return 'No basket returned usable history \u2014 try a shorter Period, or tick more baskets.'
+
+
 def render_all_tab(is_mobile):
     import portfolio
     theme_name = st.session_state.get('theme', 'Dark')
     theme = THEMES.get(theme_name, THEMES['Dark'])
     portfolio.C_POS = theme['pos']; portfolio.C_NEG = theme['neg']
     _lbl = f"color:#f8fafc;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;font-family:{FONTS}"
+
+    # Scope is ticked rather than implied. 'All' used to mean every basket in
+    # config, which is 58 of them and several minutes of fetching to answer a
+    # question about three; it now means every basket you ticked, one row each.
+    picked = basket_picker('pa', is_mobile, theme, label='Baskets to scan')
+    n_sym = sum(len(FUTURES_GROUPS.get(g, [])) for g in picked)
+    busy = (f' \u2014 the first run has to fetch all {len(picked)} of them, which '
+            f'takes a while; after that they are cached for 30 minutes'
+            if len(picked) > BUSY_BASKETS else '')
+    st.markdown(f"<div style='font-size:10px;color:{theme.get('muted', '#475569')};"
+                f"font-family:{FONTS};padding:2px 0 8px 0'>{len(picked)} baskets \u00b7 "
+                f"{n_sym:,} symbols{busy}</div>", unsafe_allow_html=True)
 
     # Row 0: Mode
     m1, m2 = st.columns([3, 5])
@@ -227,8 +260,13 @@ def render_all_tab(is_mobile):
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
         st.markdown(f"<div style='{_lbl}'>OBJECTIVE</div>", unsafe_allow_html=True)
-        score = st.selectbox("Objective", ['Win Rate', 'Composite', 'Sharpe', 'Sortino', 'MAR', 'R²', 'Total Return'],
-                              key='portall_score', label_visibility='collapsed', disabled=_dis)
+        score = st.selectbox("Objective", OBJECTIVES, key='portall_score',
+                              label_visibility='collapsed', disabled=_dis,
+                              help='What the optimiser maximises, and what the table below then sorts on \u2014 the '
+                                   'same nine SPREADS offers. Composite is the average rank across Sharpe, Sortino, '
+                                   'ROA and ER, each discounted by the square root of the basket\u2019s window '
+                                   'length, so a basket full of 2024 listings cannot out-rank ten years of history '
+                                   'on a few noisy months.')
     with c2:
         st.markdown(f"<div style='{_lbl}'>REBALANCE</div>", unsafe_allow_html=True)
         rebal_label = st.selectbox("Rebalance", list(REBAL_OPTIONS.keys()),
@@ -274,7 +312,7 @@ def render_all_tab(is_mobile):
         cost_str = st.text_input("Cost", key='portall_cost', label_visibility='collapsed')
 
     # Scan button
-    scan_clicked = st.button('▶  Scan All', key='portall_scan', type='primary')
+    scan_clicked = st.button('▶  Scan', key='portall_scan', type='primary')
 
     # Parse shared params
     rebal = REBAL_OPTIONS[rebal_label]
@@ -283,6 +321,8 @@ def render_all_tab(is_mobile):
     except (ValueError, TypeError): txn_cost = 0.001
 
     if scan_clicked:
+        if len(picked) < 1:
+            st.warning('No baskets ticked \u2014 nothing to scan.'); return
         if is_mc or is_fs:
             score_type = score
             try: max_wt = max(10, min(100, float(max_wt_str))) / 100.0
@@ -301,16 +341,16 @@ def render_all_tab(is_mobile):
 
             if is_mc:
                 progress = st.progress(0, text='Starting MC walk-forward scan...')
-                results = _run_mc_scan(period_days, rebal, txn_cost, score_type, n_sims,
+                results = _run_mc_scan(picked, period_days, rebal, txn_cost, score_type, n_sims,
                                        max_wt, min_wt, allow_short, max_vol, min_ann_ret,
                                        rank_display, progress)
             else:
                 progress = st.progress(0, text='Starting MC full-sample scan...')
-                results = _run_fs_scan(period_days, rebal, txn_cost, score_type, n_sims,
+                results = _run_fs_scan(picked, period_days, rebal, txn_cost, score_type, n_sims,
                                        max_wt, min_wt, allow_short, max_vol, min_ann_ret,
                                        rank_display, progress)
             if not results:
-                st.warning('No valid groups found'); return
+                st.warning(_nothing_ran(picked)); return
             st.session_state.portall_results = results
             st.session_state.portall_rank_key = rank_display
             st.session_state.portall_is_mc = True
@@ -320,9 +360,9 @@ def render_all_tab(is_mobile):
             rank_by_ew = SCORE_TO_RANK.get(score, 'win_rate')
             rank_display = next((k for k, v in SCAN_SORT_KEYS.items() if v[0] == rank_by_ew), 'Win Rate')
             progress = st.progress(0, text='Scanning groups...')
-            results = _run_ew_scan(period_days, rebal, txn_cost, rank_display, progress)
+            results = _run_ew_scan(picked, period_days, rebal, txn_cost, rank_display, progress)
             if not results:
-                st.warning('No valid groups found'); return
+                st.warning(_nothing_ran(picked)); return
             st.session_state.portall_results = results
             st.session_state.portall_rank_key = rank_display
             st.session_state.portall_is_mc = False
@@ -343,22 +383,16 @@ def _render_results(results, theme, rank_by, is_mobile, is_mc=False):
     _txt = theme.get('text', '#e2e8f0'); _txt2 = theme.get('text2', '#94a3b8')
     _mut = theme.get('muted', '#475569')
 
-    # Compute composite score (avg rank of Sharpe, Sortino, MAR, R²)
-    n = len(results)
-    if n > 1:
-        for metric in ['sharpe', 'sortino', 'mar', 'r2']:
-            vals = [r[metric] for r in results]
-            order = sorted(range(n), key=lambda i: -vals[i])
-            for rank, idx in enumerate(order):
-                results[idx][f'_{metric}_rank'] = rank + 1
-        for r in results:
-            r['_score'] = np.mean([r.get(f'_{m}_rank', n) for m in ['sharpe', 'sortino', 'mar', 'r2']])
-    else:
-        results[0]['_score'] = 1.0
+    # SCORE is SPREADS' composite: the average rank across Sharpe, Sortino, ROA
+    # and ER, each discounted by the square root of that basket's own window.
+    # Baskets genuinely differ in length here -- one full of 2024 listings against
+    # one with ten years -- and undiscounted the short one wins on noise.
+    composite_ranks(results)
 
-    # Sort
+    # Sort. Baskets differ in history by years, so every metric is ranked on its
+    # length-adjusted value, not just Composite; the columns stay raw.
     sort_key, reverse = SCAN_SORT_KEYS.get(rank_by, ('win_rate', True))
-    sorted_results = sorted(results, key=lambda x: x.get(sort_key, 0), reverse=reverse)
+    sorted_results = rank_rows(results, sort_key, reverse)
 
     # Build table — same pattern as spreads_scan (works reliably)
     _render_scan_table(sorted_results, theme, is_mc)
@@ -390,6 +424,8 @@ def _render_scan_table(sorted_results, theme, is_mc):
         f"<th style='{th}text-align:right'>WIN%</th>"
         f"<th style='{th}text-align:right'>SHARPE</th>"
         f"<th style='{th}text-align:right'>SORTINO</th>"
+        f"<th style='{th}text-align:right'>ROA</th>"
+        f"<th style='{th}text-align:right'>ER</th>"
         f"<th style='{th}text-align:right'>MAR</th>"
         f"<th style='{th}text-align:right'>R²</th>"
         f"<th style='{th}text-align:right'>TOT%</th>"
@@ -405,6 +441,11 @@ def _render_scan_table(sorted_results, theme, is_mc):
         tot_c = pos_c if r['total_ret'] >= 0 else neg_c
         tot_s = '+' if r['total_ret'] >= 0 else ''
         win_c = pos_c if r['win_rate'] >= 0.55 else (neg_c if r['win_rate'] < 0.45 else _txt2)
+        # Same thresholds SPREADS uses: ER over 0.30 is a directional curve,
+        # under 0.10 is chop; ROA of 3 is the desk's "worth the hole" line.
+        _er = r.get('er', 0); _roa = r.get('roa', 0)
+        er_c = pos_c if _er >= 0.30 else (_mut if _er < 0.10 else _txt2)
+        roa_c = pos_c if _roa >= 3 else (_mut if _roa <= 0 else _txt2)
         ytd_c = pos_c if r.get('ytd', 0) >= 0 else neg_c
         mtd_c = pos_c if r.get('mtd', 0) >= 0 else neg_c
         score = r.get('_score', 0)
@@ -427,6 +468,8 @@ def _render_scan_table(sorted_results, theme, is_mc):
             f"<td style='{td}text-align:right'><span style='color:{win_c};font-weight:600'>{r['win_rate']*100:.1f}%</span></td>"
             f"<td style='{td}text-align:right'><span style='color:{sh_c};font-weight:700'>{r['sharpe']:.2f}</span></td>"
             f"<td style='{td}text-align:right;color:{_txt2}'>{r['sortino']:.2f}</td>"
+            f"<td style='{td}text-align:right;color:{roa_c}'>{r.get('roa', 0):.2f}</td>"
+            f"<td style='{td}text-align:right;color:{er_c}'>{r.get('er', 0):.2f}</td>"
             f"<td style='{td}text-align:right;color:{_txt2}'>{r['mar']:.2f}</td>"
             f"<td style='{td}text-align:right;color:{_txt2}'>{r['r2']:.3f}</td>"
             f"<td style='{td}text-align:right'><span style='color:{tot_c};font-weight:600'>{tot_s}{r['total_ret']*100:.1f}%</span></td>"

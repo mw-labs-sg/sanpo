@@ -124,6 +124,7 @@ def main():
     from markets import render_markets_tab
     from private import render_private_tab
     from predictions import render_predictions_tab
+    from baskets import render_baskets_tab
 
     # Init session state
     if 'sector' not in st.session_state: st.session_state.sector = 'Futures'
@@ -188,13 +189,22 @@ def main():
     """, unsafe_allow_html=True)
 
     # Tabs
-    tab_pulse, tab_news, tab_markets, tab_pred, tab_private, tab_portfolio, tab_spreads, tab_charts, tab_options, tab_rates, tab_research = st.tabs(["PULSE", "NEWS", "MARKETS", "PREDICT", "PRIVATE", "PORTFOLIO", "SPREADS", "CHARTS", "OPTIONS", "RATES", "RESEARCH"])
+    tab_pulse, tab_news, tab_baskets, tab_spreads, tab_portfolio, tab_markets, tab_pred, tab_private, tab_charts, tab_options, tab_rates, tab_research = st.tabs(["PULSE", "NEWS", "BASKETS", "SPREADS", "PORTFOLIO", "MARKETS", "PREDICT", "PRIVATE", "CHARTS", "OPTIONS", "RATES", "RESEARCH"])
 
     with tab_pulse:
         render_pulse_tab(is_mobile)
 
     with tab_news:
         render_news_tab(is_mobile)
+
+    with tab_baskets:
+        render_baskets_tab(is_mobile)
+
+    with tab_spreads:
+        render_spreads_tab(is_mobile)
+
+    with tab_portfolio:
+        render_portfolio_tab(is_mobile)
 
     with tab_markets:
         render_markets_tab(is_mobile)
@@ -204,12 +214,6 @@ def main():
 
     with tab_private:
         render_private_tab(is_mobile)
-
-    with tab_portfolio:
-        render_portfolio_tab(is_mobile)
-
-    with tab_spreads:
-        render_spreads_tab(is_mobile)
 
     with tab_charts:
         sub_asset, sub_scanner = st.tabs(["BY ASSET", "BY TIMEFRAME"])

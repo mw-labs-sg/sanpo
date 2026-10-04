@@ -1,5 +1,10 @@
+import json
+import logging
 import streamlit as st
 from collections import OrderedDict
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 FONTS = 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
 
@@ -194,7 +199,6 @@ THEMES = {
         # RAISING the dark:bright ratio from 2.07x to 2.52x.
         'bg_gradient': (
             'radial-gradient(820px 540px at 2% -16%, rgba(56,132,255,0.84), transparent 58%),'
-            'radial-gradient(640px 460px at 99% -4%, rgba(34,190,255,0.49), transparent 54%),'
             'radial-gradient(760px 500px at 55% 116%, rgba(59,110,220,0.42), transparent 56%),'
             'linear-gradient(160deg, #03060d 0%, #040913 34%, #060e1a 62%, #010308 100%)'
         ),
@@ -203,6 +207,139 @@ THEMES = {
         'plot_bg': 'rgba(0,0,0,0)', 'grid': '#1a2740', 'axis_line': '#22314c', 'tick': '#9fb2ca',
     },
 }
+
+# =============================================================================
+# BASKETS
+# =============================================================================
+# Once baskets.json exists it IS the list: every basket in it is editable and
+# deletable on the BASKETS tab, including the ones that started life in the
+# dict above. That dict is only the seed, used before the file is written and
+# again if the file is ever emptied, so the app always has something to show.
+#
+# The file is loaded into that SAME dict, in place, at import time: every
+# module does `from config import FUTURES_GROUPS`, so they all hold one object
+# and loading here reaches every preset dropdown without touching a consumer.
+
+BASKETS_FILE = Path(__file__).parent / 'baskets.json'
+
+_DEFAULT_GROUPS = OrderedDict((k, list(v)) for k, v in FUTURES_GROUPS.items())
+
+# Baskets carry a category so the pickers can be sectioned instead of being one
+# flat wall of 41 checkboxes. It is a free-text label stored per basket, not a
+# fixed taxonomy: a basket that has never been filed lands in DEFAULT_CATEGORY.
+DEFAULT_CATEGORY = 'Other'
+BASKET_CATEGORIES = {}
+
+
+def parse_symbols(text):
+    """Split a typed basket into Yahoo symbols: comma, space or newline, deduped.
+
+    Order is the user's; it is what the preset dropdowns hand downstream.
+    """
+    raw = str(text or '').replace(chr(10), ',').replace(chr(9), ',').replace(' ', ',')
+    out = []
+    for tok in raw.split(','):
+        sym = tok.strip().upper()
+        if sym and sym not in out:
+            out.append(sym)
+    return out
+
+
+def load_baskets():
+    """(baskets, categories) from the file, in file order.
+
+    Never raises — a bad file just reads empty.
+    """
+    try:
+        with open(BASKETS_FILE, encoding='utf-8') as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return OrderedDict(), {}
+    except Exception as e:
+        logger.warning(f"baskets.json unreadable: {e}")
+        return OrderedDict(), {}
+
+    out = OrderedDict()
+    cats = {}
+    for b in data.get('baskets', []):
+        try:
+            name = str(b.get('name', '')).strip()
+            syms = [str(x).strip().upper() for x in b.get('symbols', []) if str(x).strip()]
+            cat = str(b.get('category', '') or '').strip()
+        except Exception:
+            continue
+        if name and syms:
+            out[name] = syms
+            cats[name] = cat or DEFAULT_CATEGORY
+    return out, cats
+
+
+def apply_baskets(baskets=None, categories=None):
+    """Replace FUTURES_GROUPS in place with the saved list.
+
+    Replaced rather than merged: a basket deleted on the BASKETS tab has to
+    disappear from every dropdown, whether or not it shipped with the code. An
+    empty or missing file falls back to the seed so the app is never groupless.
+    """
+    if baskets is None:
+        baskets, loaded_cats = load_baskets()
+        if categories is None:
+            categories = loaded_cats
+    source = baskets or _DEFAULT_GROUPS
+    FUTURES_GROUPS.clear()
+    for name, syms in source.items():
+        FUTURES_GROUPS[name] = list(syms)
+    cats = categories or {}
+    BASKET_CATEGORIES.clear()
+    for name in FUTURES_GROUPS:
+        BASKET_CATEGORIES[name] = cats.get(name, DEFAULT_CATEGORY)
+    return FUTURES_GROUPS
+
+
+def basket_category(name):
+    return BASKET_CATEGORIES.get(name, DEFAULT_CATEGORY)
+
+
+def categories_in_order():
+    """Categories as the baskets list them, so the sections follow the file."""
+    seen = []
+    for name in FUTURES_GROUPS:
+        c = basket_category(name)
+        if c not in seen:
+            seen.append(c)
+    return seen
+
+
+def baskets_payload(baskets, categories=None):
+    """The baskets.json body — no timestamp, so it can key a push cache."""
+    cats = categories or {}
+    return json.dumps({
+        'source': 'SANPO Baskets',
+        'count': len(baskets),
+        'baskets': [{'name': k,
+                     'category': (cats or {}).get(k, DEFAULT_CATEGORY),
+                     'symbols': list(v)} for k, v in baskets.items()],
+    }, indent=2, ensure_ascii=False)
+
+
+def save_baskets(baskets, categories=None):
+    """Write the whole list to baskets.json and load it into FUTURES_GROUPS.
+
+    baskets.json is the master list; this is the only thing that writes it.
+    """
+    body = baskets_payload(baskets, categories)
+    try:
+        BASKETS_FILE.write_text(body + chr(10), encoding='utf-8')
+    except OSError as e:
+        # Read-only filesystem: the in-memory merge and the GitHub push below
+        # still work, so a save is not lost.
+        logger.warning(f"baskets.json not written: {e}")
+    apply_baskets(baskets, categories)
+    return body
+
+
+apply_baskets()
+
 
 # =============================================================================
 # SHARED HELPERS
