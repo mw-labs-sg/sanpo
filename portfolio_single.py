@@ -6,7 +6,8 @@ from config import (FUTURES_GROUPS, THEMES, SYMBOL_NAMES, FONTS, clean_symbol,
                     filter_listings)
 from portfolio import (C_MUTE, C_BG, C_TXT, C_TXT2, C_GOLD, BENCH_COLORS, MAX_BENCHMARKS, _tint,
                        REBAL_OPTIONS, PERIOD_OPTIONS, SCORE_TO_RANK, OBJECTIVES,
-                       fetch_symbol_history, fetch_notes, min_hist_tradeoffs, min_hist_auto,
+                       fetch_symbol_history, fetch_notes, min_hist_frontier, min_hist_auto,
+                       min_hist_days_for,
                        benchmark_series, _bench_metrics, _calc_oos_metrics,
                        run_walkforward_grid, run_fullsample,
                        render_ranking_table,
@@ -64,7 +65,7 @@ def _resolve_min_hist(symbols, fetch_days, min_hist_str):
         chosen = min_hist_auto(fetch_notes(symbols, fetch_days, 0), fetch_days)
         if chosen is None:
             return 0, None
-        return int(chosen[0] * 365), chosen
+        return min_hist_days_for(chosen[4]), chosen
     try:
         return (int(max(0, min(20, float(raw))) * 365) if raw else 0), None
     except (ValueError, TypeError):
@@ -72,14 +73,16 @@ def _resolve_min_hist(symbols, fetch_days, min_hist_str):
 
 
 def _suggest_min_hist(notes, fetch_days):
-    """Print what each Min Hist Y would buy, so the fix is a number you can read
-    off rather than one you have to guess and re-run."""
-    rows = [r for r in min_hist_tradeoffs(notes) if r[0] * 365 < fetch_days]
+    """Print what each window costs in symbols, so the fix is something you can
+    read off rather than guess at and re-run."""
+    rows = min_hist_frontier(notes, fetch_days)
     if not rows:
         return
-    bits = [f'**{yrs}y** keeps {kept}/{total}, {days:,} days from {start.date()}'
-            for yrs, kept, total, days, start in rows]
-    st.caption('Min Hist Y &mdash; ' + ' &nbsp;·&nbsp; '.join(bits))
+    bits = [f'drop **{dropped}** &rarr; {days:,} days (Min Hist Y '
+            f'{min_hist_days_for(cutoff) / 365:.1f})'
+            for dropped, _kept, _total, days, cutoff in rows if dropped]
+    if bits:
+        st.caption('To buy a longer window &mdash; ' + ' &nbsp;·&nbsp; '.join(bits))
 
 
 def _fetch_failure(symbols, fetch_days, what, min_hist_days=0):
@@ -266,7 +269,7 @@ def render_single_tab(is_mobile):
 
     _defaults = {'port_sims': '10000',
                  'port_maxwt': '50', 'port_minwt': '0', 'port_cost': '0.10', 'port_maxvol': '',
-                 'port_minret': '', 'port_minpos': '', 'port_round': '', 'port_minhist': '',
+                 'port_minret': '', 'port_minpos': '', 'port_round': '', 'port_minhist': 'auto',
                  'port_maxpos': ''}
     for k, v in _defaults.items():
         if k not in st.session_state: st.session_state[k] = v
@@ -391,12 +394,13 @@ def render_single_tab(is_mobile):
     with st.expander('More settings \u2014 data, constraints and cost'):
         d1, d2, d3, d4, d5 = st.columns(5)
         with d1:
-            min_hist_str = st.text_input('Min Hist Y', key='port_minhist', placeholder='e.g. 2 or auto',
-                                         help='Leave out symbols listed more recently than this many years. Every asset '
-                                              'needs a price on every day of the backtest, so one recent IPO drags the '
-                                              'whole basket down to its listing date. The run says what it dropped. '
-                                              'Type auto and it picks the mildest cutoff that buys a workable window '
-                                              '\u2014 it will not prune further than it has to.')
+            min_hist_str = st.text_input('Min Hist Y', key='port_minhist', placeholder='auto, or e.g. 2',
+                                         help='Leave out symbols listed more recently than this many years. Every '
+                                              'asset needs a price on every day of the backtest, so one 2026 listing '
+                                              'drags three hundred names down to its own listing date. The default, '
+                                              'auto, leaves out whatever does not fit the lookback \u2014 the fewest '
+                                              'listings it can, and it says which. Blank keeps every symbol in and '
+                                              'lets the newest one set the window for everyone.')
         with d2:
             sims_str = st.text_input('Sims', key='port_sims', disabled=_dis,
                                      help='Random weight combinations tested per lookback window. Higher is steadier '
@@ -463,9 +467,11 @@ def render_single_tab(is_mobile):
                 st.caption('\u24d8 Auto found no cutoff that buys a longer shared window \u2014 '
                            'running with every symbol in.')
             else:
-                yrs, kept, total, days, start = auto_pick
-                st.caption(f'\u24d8 Auto set Min Hist to {yrs}y: kept {kept} of {total} symbols and '
-                           f'{days:,} shared trading days from {start.date()}.')
+                dropped, kept, total, days, cutoff = auto_pick
+                st.caption(f'\u24d8 Auto left out the {dropped} newest listing'
+                           f'{"s" if dropped != 1 else ""} of {total} \u2014 anything after '
+                           f'{cutoff.date()} \u2014 which takes the shared window to '
+                           f'{days:,} trading days across {kept} symbols.')
         if is_mc:
             _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
                     direction, sims_str, max_wt_str, min_wt_str, max_vol_str, min_ret_str,

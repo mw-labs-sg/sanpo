@@ -228,62 +228,76 @@ def fetch_symbol_history(symbols_tuple, days=1800, min_history_days=0):
     if len(common) < 50: return None, valid
     return common, valid
 
-def min_hist_tradeoffs(notes, candidates=(1, 2, 3, 5, 7, 10)):
-    """What each Min Hist Y setting would actually cost, and buy.
+# Windows worth asking for, in trading days: one, two, three and five years.
+WINDOW_TARGETS = (252, 504, 756, 1260)
 
-    "Set Min Hist Y" is not advice anyone can act on when the universe is 350
-    names pooled out of fourteen baskets: the number you want depends on which
-    listings are governing the shared window, which is the one thing you cannot
-    see. This answers it directly -- for each candidate, how many symbols
-    survive and how long the shared window becomes.
-
-    Returns [(years, n_kept, n_total, n_days, start_date)], shortest first, with
-    settings that buy nothing over the previous one left out.
-    """
-    firsts = notes.get('firsts') or []
-    idx = notes.get('index')
-    if not firsts or idx is None or not len(idx):
-        return []
-    now = pd.Timestamp.now().normalize()
-    out = []
-    for yrs in candidates:
-        cutoff = now - pd.Timedelta(days=int(yrs * 365))
-        kept = [d for _s, d in firsts if d <= cutoff]
-        if len(kept) < 2:
-            continue
-        start = max(kept)
-        days = int((idx >= start).sum())
-        if out and days <= out[-1][3]:
-            continue          # buys no more history than a looser setting
-        out.append((yrs, len(kept), len(firsts), days, start))
-    return out
-
-
-# A window shorter than this cannot feed the 12mo family of approaches, which is
-# where most of the board lives; below it you are choosing between the 3mo blends
-# and nothing. It is the bar Auto tries to clear.
+# Below a year of shared history the 12mo family of approaches cannot run at all,
+# and most of the board lives there. It is the bar Auto tries to clear.
 AUTO_TARGET_DAYS = 252
 
 
+def min_hist_frontier(notes, fetch_days, targets=WINDOW_TARGETS):
+    """The cheapest way to buy a given window, priced in symbols.
+
+    A years cutoff is the wrong unit for this question. What governs the shared
+    window is not an age but a handful of specific listings, and the honest
+    answer is "drop these three and you get two years" -- so that is what this
+    returns. Dropping the k newest listings leaves the (k+1)-th newest governing
+    the window, which makes the whole frontier one pass down the sorted listing
+    dates: exact, and no grid to fall between.
+
+    Returns [(n_dropped, n_kept, n_total, n_days, cutoff_date)], cheapest first.
+    """
+    firsts = sorted((d for _s, d in (notes.get('firsts') or [])), reverse=True)
+    idx = notes.get('index')
+    total = len(firsts)
+    if total < 2 or idx is None or not len(idx):
+        return []
+    rows, k = [], 0
+    for target in targets:
+        # Asking for more history than Period even fetched is not an option.
+        if target > len(idx):
+            break
+        while k <= total - 2 and int((idx >= firsts[k]).sum()) < target:
+            k += 1
+        if k > total - 2:
+            break
+        cutoff = firsts[k]
+        days = int((idx >= cutoff).sum())
+        # Count by DATE, not by k: several symbols can share a listing date, and
+        # a cutoff keeps all of them or none.
+        kept = sum(1 for d in firsts if d <= cutoff)
+        row = (total - kept, kept, total, days, cutoff)
+        if rows and row[0] == rows[-1][0]:
+            rows[-1] = row if row[3] > rows[-1][3] else rows[-1]
+            continue
+        rows.append(row)
+    return rows
+
+
 def min_hist_auto(notes, fetch_days, target_days=AUTO_TARGET_DAYS):
-    """The smallest Min Hist Y that buys a workable window, or 0 to leave it be.
+    """The cheapest exclusion that buys a workable window, or None to leave it be.
 
     Prefers the LEAST exclusion that clears the target: dropping symbols is a
-    real cost, and the point is to stop two 2026 listings governing three
-    hundred names, not to prune the universe for its own sake. If nothing
-    clears the bar, take whichever setting buys the longest window, since the
-    alternative is a run that cannot happen at all.
+    real cost, and the job is to stop two 2026 listings governing three hundred
+    names, not to prune the universe for its own sake. If nothing clears the
+    bar, take whatever buys the longest window, since the alternative is a run
+    that cannot happen at all.
 
-    Returns (years, n_kept, n_total, n_days, start) or None.
+    Returns a frontier row, or None when there is nothing to gain.
     """
-    rows = [r for r in min_hist_tradeoffs(notes) if r[0] * 365 < fetch_days]
+    rows = min_hist_frontier(notes, fetch_days)
     if not rows:
         return None
     current = notes.get('common_rows') or 0
     usable = [r for r in rows if r[3] >= target_days]
     best = usable[0] if usable else max(rows, key=lambda r: r[3])
-    # Only worth doing if it actually buys something.
     return best if best[3] > current else None
+
+
+def min_hist_days_for(cutoff):
+    """The Min Hist Y cutoff date, as the number of days the fetch filter wants."""
+    return max(int((pd.Timestamp.now().normalize() - cutoff).days), 0)
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
