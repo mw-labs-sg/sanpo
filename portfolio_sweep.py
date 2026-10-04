@@ -148,7 +148,7 @@ def render_sweep_tab(is_mobile):
         st.selectbox('Listings', LISTINGS, key='sweep_listings',
                      help='Which exchanges to draw from. Same test the Single tab uses.')
     with a2:
-        period_label = st.selectbox('Period', list(PERIOD_OPTIONS.keys()), index=2,
+        period_label = st.selectbox('Period', list(PERIOD_OPTIONS.keys()), index=3,
                                     key='sweep_period',
                                     help='How much price history to pull. Every cell in the sweep '
                                          'sees the same history, so this is the one setting that '

@@ -76,7 +76,7 @@ REBAL_OPTIONS = OrderedDict([
 ])
 
 PERIOD_OPTIONS = OrderedDict([
-    ('1 Year', 365), ('2 Years', 730), ('5 Years', 1825),
+    ('1 Year', 365), ('2 Years', 730), ('3 Years', 1095), ('5 Years', 1825),
     ('10 Years', 3650), ('Max', 9999),
 ])
 

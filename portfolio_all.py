@@ -274,7 +274,7 @@ def render_all_tab(is_mobile):
     with c3:
         st.markdown(f"<div style='{_lbl}'>PERIOD</div>", unsafe_allow_html=True)
         period_label = st.selectbox("Period", list(PERIOD_OPTIONS.keys()),
-                                     index=2, key='portall_period', label_visibility='collapsed')
+                                     index=3, key='portall_period', label_visibility='collapsed')
     with c4:
         st.markdown(f"<div style='{_lbl}'>DIRECTION</div>", unsafe_allow_html=True)
         direction = st.selectbox("Direction", ['Long Only', 'Long/Short'],

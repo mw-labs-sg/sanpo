@@ -449,7 +449,7 @@ def render_single_tab(is_mobile):
                                      'uses Shared window, because one fixed weight vector cannot '
                                      'be carried through a period a symbol did not exist for.')
     with b4:
-        period_label = st.selectbox('Period', list(PERIOD_OPTIONS.keys()), index=2, key='port_period',
+        period_label = st.selectbox('Period', list(PERIOD_OPTIONS.keys()), index=3, key='port_period',
                                     help='How much price history to pull. Longer gives more to learn from and a longer '
                                          'backtest, but drags in older market regimes.')
     with b5:
