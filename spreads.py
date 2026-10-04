@@ -11,7 +11,7 @@ import logging
 from collections import OrderedDict
 
 from config import (FUTURES_GROUPS, SYMBOL_NAMES, FONTS, clean_symbol,
-                    basket_category, sort_val)
+                    basket_category, sort_val, drop_listing_artifacts)
 
 logger = logging.getLogger(__name__)
 
@@ -235,7 +235,12 @@ def fetch_sector_spread_data(sector, lookback_days=0):
                 closes.index = closes.index.tz_localize(None) if closes.index.tz else closes.index
                 closes.index = closes.index.normalize()
                 closes = closes.groupby(closes.index).last()
-                data[sym] = closes
+                # Same guard PORTFOLIO's fetch carries: a pre-listing placeholder
+                # price prints one impossible bar, and every statistic below
+                # reads it as a real move.
+                closes, _cut = drop_listing_artifacts(closes)
+                if closes is not None and len(closes) >= 2:
+                    data[sym] = closes
         except Exception as e:
             logger.debug(f"[{sym}] spread data fetch error: {e}")
     if data.empty or len(data.columns) < 2: return None
@@ -543,6 +548,11 @@ def fetch_interval_data(symbols, interval_key, lookback_days):
             if interval_key in ('1d', '1wk'):
                 closes.index = closes.index.normalize()
                 closes = closes.groupby(closes.index).last()
+            # Same guard as the daily fetch. A pre-listing placeholder price is
+            # rarer inside an intraday window, but 4h reaches back two years.
+            closes, _cut = drop_listing_artifacts(closes)
+            if closes is None or len(closes) < 2:
+                continue
             frames[sym] = closes
         except Exception as e:
             logger.debug(f"[{sym}] fetch error ({interval_key}): {e}")

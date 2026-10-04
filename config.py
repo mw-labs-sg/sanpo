@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import streamlit as st
 from collections import OrderedDict
 from pathlib import Path
@@ -345,6 +346,32 @@ apply_baskets()
 # SHARED HELPERS
 # =============================================================================
 
+# Yahoo marks a non-US listing with an exchange suffix -- 7203.T, 0700.HK,
+# D05.SI, ASML.AS, 005930.KS. A US listing carries no suffix at all, and neither
+# do the instrument classes that are not stocks in the first place: ^GSPC,
+# BTC-USD, ES=F, EURUSD=X. So the suffix IS the test, and the non-stocks fall
+# out of the question rather than having to be special-cased into it.
+_EXCHANGE_SUFFIX = re.compile(r'\.[A-Za-z]{1,4}$')
+
+
+def is_us_listed(sym):
+    """True for a US listing, and for anything that is not a listed stock.
+
+    BRK-B and BTC-USD both come back True: a hyphen is not an exchange suffix,
+    and a token has no exchange to be foreign to.
+    """
+    return not _EXCHANGE_SUFFIX.search((sym or '').strip())
+
+
+def filter_listings(symbols, mode):
+    """SYMBOLS kept under 'All listings', 'US only' or 'Non-US only'."""
+    if mode == 'US only':
+        return [s for s in symbols if is_us_listed(s)]
+    if mode == 'Non-US only':
+        return [s for s in symbols if not is_us_listed(s)]
+    return list(symbols)
+
+
 def clean_symbol(sym):
     return (sym.replace('=F', '').replace('=X', '').replace('.SI', '')
                .replace('^', '').replace('-USD', '').replace('-GBP', '').replace('-EUR', ''))
@@ -370,6 +397,37 @@ def st_html(page, height=0):
         return st.iframe(page, height=max(1, int(height)))
     from streamlit.components.v1 import html as _legacy_html
     return _legacy_html(page, height=height)
+
+# A one-bar move larger than this is not a price move. Measured across all 58
+# baskets, the largest REAL single-day return anywhere is +456% -- a microcap on
+# a bitcoin-treasury announcement -- and the next ones down are +251% and +248%.
+# The only two things above +900% are WLD going 0.0076 -> 2.36 and TAO going
+# 0.126 -> 87.78, both Yahoo placeholder prints from before the token actually
+# listed. Two orders of magnitude of daylight, so the threshold does not have to
+# be delicate.
+LISTING_ARTIFACT_RETURN = 9.0
+
+
+def drop_listing_artifacts(closes, threshold=LISTING_ARTIFACT_RETURN):
+    """Cut a price series back to just after its last implausible jump.
+
+    Yahoo serves a flat placeholder price for the days before some crypto tokens
+    really listed, so a pct_change across that boundary is a +31,000% bar. One of
+    those is enough to wreck everything downstream: the AI & DePIN basket posted
+    a Sortino of 33 against a Sharpe of 0.47 and a +5,024% total return on the
+    strength of two, and the optimiser duly allocated half the book to them.
+
+    Everything up to and including the bad bar goes; the real history after it is
+    kept, because it is real. Returns (series, cut_date_or_None).
+    """
+    if closes is None or len(closes) < 3:
+        return closes, None
+    bad = closes.index[closes.pct_change() > threshold]
+    if not len(bad):
+        return closes, None
+    last = bad[-1]
+    return closes.loc[closes.index > last], last
+
 
 def sort_val(v, default=float('-inf')):
     """Sort key for optional numerics.

@@ -2,10 +2,12 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from config import FUTURES_GROUPS, THEMES, SYMBOL_NAMES, FONTS, clean_symbol
+from config import (FUTURES_GROUPS, THEMES, SYMBOL_NAMES, FONTS, clean_symbol,
+                    filter_listings)
 from portfolio import (C_MUTE, C_BG, C_TXT, C_TXT2, C_GOLD, BENCH_COLORS, MAX_BENCHMARKS, _tint,
                        REBAL_OPTIONS, PERIOD_OPTIONS, SCORE_TO_RANK, OBJECTIVES,
-                       fetch_symbol_history, fetch_notes, benchmark_series, _bench_metrics, _calc_oos_metrics,
+                       fetch_symbol_history, fetch_notes, min_hist_tradeoffs, min_hist_auto,
+                       benchmark_series, _bench_metrics, _calc_oos_metrics,
                        run_walkforward_grid, run_fullsample,
                        render_ranking_table,
                        render_weights_table, render_oos_chart,
@@ -13,6 +15,12 @@ from portfolio import (C_MUTE, C_BG, C_TXT, C_TXT2, C_GOLD, BENCH_COLORS, MAX_BE
 # The universe is ticked, not typed, and it is the same checkbox list SPREADS
 # uses -- one picker, one meaning of "basket", wherever you are.
 from spreads import basket_picker
+
+
+# A basket like Electrical is two thirds Tokyo, Seoul and Taipei listings. They
+# are real holdings, but they are also the ones you may not be able to trade,
+# and they keep their own holidays, which shortens the window everyone shares.
+LISTINGS = ['All listings', 'US only', 'Non-US only']
 
 
 def _pool(picked):
@@ -37,6 +45,41 @@ def _clean_benchmarks(raw):
         sym = ''.join(c for c in part.strip().upper() if c.isalnum() or c in '.^=-:')
         if sym and sym not in out: out.append(sym)
     return out[:MAX_BENCHMARKS]
+
+
+def _resolve_min_hist(symbols, fetch_days, min_hist_str):
+    """Turn the Min Hist Y box into a number of days.
+
+    "auto" asks the data rather than the user: fetch once unfiltered, look at
+    which listings are governing the shared window, and pick the mildest cutoff
+    that buys a workable one. The probe fetch is the same cached call the run
+    makes next, so it costs nothing the second time.
+
+    Returns (days, chosen_row_or_None). The row is what Auto decided, for the
+    caption -- silently dropping symbols is not something to do quietly.
+    """
+    raw = (min_hist_str or '').strip().lower()
+    if raw in ('auto', 'a'):
+        fetch_symbol_history(tuple(symbols), days=fetch_days)
+        chosen = min_hist_auto(fetch_notes(symbols, fetch_days, 0), fetch_days)
+        if chosen is None:
+            return 0, None
+        return int(chosen[0] * 365), chosen
+    try:
+        return (int(max(0, min(20, float(raw))) * 365) if raw else 0), None
+    except (ValueError, TypeError):
+        return 0, None
+
+
+def _suggest_min_hist(notes, fetch_days):
+    """Print what each Min Hist Y would buy, so the fix is a number you can read
+    off rather than one you have to guess and re-run."""
+    rows = [r for r in min_hist_tradeoffs(notes) if r[0] * 365 < fetch_days]
+    if not rows:
+        return
+    bits = [f'**{yrs}y** keeps {kept}/{total}, {days:,} days from {start.date()}'
+            for yrs, kept, total, days, start in rows]
+    st.caption('Min Hist Y &mdash; ' + ' &nbsp;·&nbsp; '.join(bits))
 
 
 def _fetch_failure(symbols, fetch_days, what, min_hist_days=0):
@@ -70,19 +113,30 @@ def _fetch_failure(symbols, fetch_days, what, min_hist_days=0):
         lim = ', '.join(f"{sym} ({d.date()})" for sym, d in notes['limiters'])
         st.warning(f"{ok} symbols fetched, but they only overlap for {notes['common_rows']} trading days. "
                    f"Latest listings: {lim}. Set Min Hist Y to exclude them automatically, or drop them by hand.")
+        _suggest_min_hist(notes, fetch_days)
     else:
         span = f"{notes['start'].date()} to {notes['end'].date()}" if notes['start'] is not None else 'the shared window'
         lim = ', '.join(f"{sym} ({d.date()})" for sym, d in notes['limiters'])
         st.warning(f"{ok} symbols share only {notes['common_rows']} trading days ({span}), which is too short for "
                    f"any lookback in this mode. Latest listings: {lim} — set Min Hist Y to exclude symbols that "
                    f"new, or use a shorter lookback.")
+        _suggest_min_hist(notes, fetch_days)
 
 
 def _note_window(symbols, fetch_days, min_hist_days=0):
     """A couple of recent IPOs can quietly cut a 5-year request down to 2 years,
     taking the longer lookbacks with them. Say so rather than let it pass."""
     notes = fetch_notes(symbols, fetch_days, min_hist_days)
-    if not notes or not notes['limiters'] or notes['start'] is None: return
+    if not notes: return
+    # Said unconditionally: a trimmed symbol changes every number on the page,
+    # and it is not the kind of thing to find out about by noticing a Sortino
+    # of 33 against a Sharpe of 0.47.
+    if notes.get('trimmed'):
+        cut = ', '.join(f'{sym} (from {d.date()})' for sym, d in notes['trimmed'][:5])
+        more = f" and {len(notes['trimmed']) - 5} more" if len(notes['trimmed']) > 5 else ''
+        st.caption(f"ⓘ Dropped a pre-listing placeholder price on {cut}{more} — "
+                   f"history starts after the jump.")
+    if not notes['limiters'] or notes['start'] is None: return
     if notes['too_new']:
         st.caption(f"ⓘ Min Hist excluded {len(notes['too_new'])} symbol(s) listed after "
                    f"{notes['cutoff'].date()}: {', '.join(notes['too_new'][:15])}"
@@ -93,6 +147,9 @@ def _note_window(symbols, fetch_days, min_hist_days=0):
     st.caption(f"ⓘ Shared history starts {notes['start'].date()} — {notes['common_rows']} of "
                f"{notes['union_rows']} trading days, {lost} lost to the latest listings ({lim}). "
                f"Backtests and the longer lookbacks only see the shared window.")
+    # The run worked, but losing two thirds of the window to two listings is
+    # worth a second look, and the answer is a number -- so give the number.
+    _suggest_min_hist(notes, fetch_days)
 
 
 def _warn_failed(failed):
@@ -100,8 +157,12 @@ def _warn_failed(failed):
         st.warning(f"No usable history for {', '.join(failed)} — left out of the comparison")
 
 
+def _is_auto(v):
+    return (v or '').strip().lower() in ('auto', 'a')
+
+
 def _validate(symbols, max_wt_str, min_wt_str, min_pos_str, round_str, min_hist_str,
-              cost_str, sims_str, fetch_days):
+              cost_str, sims_str, fetch_days, max_pos_str=''):
     """Catch the settings that quietly fight each other before a run burns a minute
     on them. Returns (errors, notes): errors stop the run, notes are just FYI."""
     errors = []; notes = []
@@ -116,18 +177,36 @@ def _validate(symbols, max_wt_str, min_wt_str, min_pos_str, round_str, min_hist_
 
     max_wt, min_wt = num(max_wt_str, 50), num(min_wt_str, 0)
     min_pos, step = num(min_pos_str), num(round_str)
-    min_hist, cost, sims = num(min_hist_str), num(cost_str, 0.10), num(sims_str, 10000)
+    max_pos = num(max_pos_str)
+    min_hist = None if _is_auto(min_hist_str) else num(min_hist_str)
+    cost, sims = num(cost_str, 0.10), num(sims_str, 10000)
 
     if max_wt is None: errors.append('Max Wt % must be a number.')
     if min_wt is None: errors.append('Min Wt % must be a number.')
     if num(min_pos_str, 0) is None: errors.append('Min Pos % must be a number, or blank.')
     if num(round_str, 0) is None: errors.append('Round % must be a number, or blank.')
-    if num(min_hist_str, 0) is None: errors.append('Min Hist Y must be a number, or blank.')
+    if not _is_auto(min_hist_str) and num(min_hist_str, 0) is None:
+        errors.append('Min Hist Y must be a number, "auto", or blank.')
+    if num(max_pos_str, 0) is None: errors.append('Max Pos must be a whole number, or blank.')
     if cost is None: errors.append('Cost % must be a number.')
     if sims is None: errors.append('Sims must be a number.')
     if errors: return errors, notes
 
     n = max(len(symbols), 1)
+    if max_pos is not None and max_pos < 2:
+        errors.append('Max Pos must be at least 2 \u2014 a portfolio needs two holdings.')
+    elif max_pos and max_wt and max_wt * max_pos <= 100:
+        # Exactly 100 is not enough: it leaves one feasible book (every holding
+        # pinned to the ceiling), and the rescale-and-clip that concentrates the
+        # weights has no room to converge on it, so the cap silently does nothing.
+        errors.append(f'Max Pos {max_pos:g} names at Max Wt {max_wt:g}% leaves no room — '
+                      f'{max_pos:g} x {max_wt:g}% is {max_wt * max_pos:.0f}% of the portfolio. '
+                      f'Raise one of them.')
+    elif max_pos and max_pos >= n:
+        notes.append(f'Max Pos {max_pos:g} is at or above the {n} symbols in play, so nothing is cut.')
+    if max_pos and min_wt:
+        notes.append('Min Wt % forces EVERY symbol in at that weight, which Max Pos then cuts '
+                     'back down \u2014 the two pull against each other.')
     if min_wt and max_wt and min_wt >= max_wt:
         notes.append(f'Min Wt {min_wt:g}% is not below Max Wt {max_wt:g}% \u2014 the floor will be ignored.')
     if min_wt and min_wt * n > 100:
@@ -187,7 +266,8 @@ def render_single_tab(is_mobile):
 
     _defaults = {'port_sims': '10000',
                  'port_maxwt': '50', 'port_minwt': '0', 'port_cost': '0.10', 'port_maxvol': '',
-                 'port_minret': '', 'port_minpos': '', 'port_round': '', 'port_minhist': ''}
+                 'port_minret': '', 'port_minpos': '', 'port_round': '', 'port_minhist': '',
+                 'port_maxpos': ''}
     for k, v in _defaults.items():
         if k not in st.session_state: st.session_state[k] = v
     for k, v in [('port_maxwt', '50'), ('port_minwt', '0'), ('port_cost', '0.10'), ('port_sims', '10000')]:
@@ -202,12 +282,18 @@ def render_single_tab(is_mobile):
     # several pools their symbols into ONE portfolio -- the All sub-tab is the
     # view that keeps each basket separate.
     picked = basket_picker('po', is_mobile, theme, label='Baskets in play')
-    symbols = _pool(picked)
-    dupes = sum(len(FUTURES_GROUPS.get(g, [])) for g in picked) - len(symbols)
-    overlap = f' \u00b7 {dupes} duplicate{"s" if dupes != 1 else ""} dropped' if dupes else ''
+    pooled = _pool(picked)
+    listings = st.session_state.get('port_listings', LISTINGS[0])
+    symbols = filter_listings(pooled, listings)
+    dupes = sum(len(FUTURES_GROUPS.get(g, [])) for g in picked) - len(pooled)
+    bits = [f'{len(picked)} baskets', f'{len(symbols):,} symbols']
+    if dupes:
+        bits.append(f'{dupes} duplicate{"s" if dupes != 1 else ""} dropped')
+    if len(symbols) != len(pooled):
+        bits.append(f'{len(pooled) - len(symbols)} dropped by {listings}')
     st.markdown(f"<div style='font-size:10px;color:{C_MUTE};font-family:{FONTS};"
-                f"padding:2px 0 8px 2px'>{len(picked)} baskets \u00b7 {len(symbols):,} "
-                f"symbols{overlap}</div>", unsafe_allow_html=True)
+                f"padding:2px 0 8px 2px'>{' \u00b7 '.join(bits)}</div>",
+                unsafe_allow_html=True)
 
     # The name the results carry. One basket names itself; several are only
     # honestly described by their count.
@@ -218,7 +304,15 @@ def render_single_tab(is_mobile):
     else:
         st.session_state.port_preset_name = 'Portfolio'
 
-    a1, a2 = st.columns(2)
+    a1, a2, a3 = st.columns(3)
+    with a2:
+        st.selectbox('Listings', LISTINGS, key='port_listings',
+                     help='Which exchanges to draw from. Yahoo marks every non-US listing with a '
+                          'suffix — 7203.T, 0700.HK, D05.SI — so US only keeps the '
+                          'unsuffixed tickers and drops the rest. Indices, crypto, futures and FX '
+                          'have no exchange to be foreign to and are never dropped. Worth reaching '
+                          'for when a basket is two thirds Tokyo and Taipei: those names also keep '
+                          'their own holidays, which shortens the window everyone shares.')
     with a1:
         mode = st.selectbox('Mode', ['Monte Carlo (Walk-Forward)', 'Monte Carlo (Full Sample)', 'Equal Weight'],
                             key='port_mode',
@@ -226,7 +320,7 @@ def render_single_tab(is_mobile):
                                  'period that follows, which is the honest test. Full Sample optimises on all the data '
                                  'and scores the same data, which flatters. Equal Weight skips optimisation: every '
                                  'asset gets 1/N.')
-    with a2:
+    with a3:
         bench_input = st.text_input('Benchmark (optional)', key='port_bench',
                                     placeholder=f'e.g. SPY, XLV (max {MAX_BENCHMARKS})',
                                     help='Comparison tickers, comma-separated. They get no weight and are not part of '
@@ -266,7 +360,15 @@ def render_single_tab(is_mobile):
 
     # ---------------------------------------------------------------- how to execute
     _group('HOW TO EXECUTE', 'shape the weights into something you can actually trade')
-    c1, c2, c3, c4 = st.columns(4)
+    c0, c1, c2, c3, c4 = st.columns(5)
+    with c0:
+        max_pos_str = st.text_input('Max Pos (how many names)', key='port_maxpos', placeholder='e.g. 20',
+                                    disabled=_dis,
+                                    help='Cap on how many holdings the portfolio ends up with. The optimiser '
+                                         'picks its weights over the whole universe, then everything outside '
+                                         'the biggest N goes to 0 and the survivors are rescaled to 100%. '
+                                         'Tick fourteen baskets and this is what turns 350 candidates into a '
+                                         'book you can actually place. Blank keeps every name it wanted.')
     with c1:
         min_pos_str = st.text_input('Min Pos % (drop below)', key='port_minpos', placeholder='e.g. 1', disabled=_dis,
                                     help='Dust cut. After the weights are chosen, anything under this goes to 0 and the '
@@ -289,10 +391,12 @@ def render_single_tab(is_mobile):
     with st.expander('More settings \u2014 data, constraints and cost'):
         d1, d2, d3, d4, d5 = st.columns(5)
         with d1:
-            min_hist_str = st.text_input('Min Hist Y', key='port_minhist', placeholder='e.g. 2',
+            min_hist_str = st.text_input('Min Hist Y', key='port_minhist', placeholder='e.g. 2 or auto',
                                          help='Leave out symbols listed more recently than this many years. Every asset '
                                               'needs a price on every day of the backtest, so one recent IPO drags the '
-                                              'whole basket down to its listing date. The run says what it dropped.')
+                                              'whole basket down to its listing date. The run says what it dropped. '
+                                              'Type auto and it picks the mildest cutoff that buys a workable window '
+                                              '\u2014 it will not prune further than it has to.')
         with d2:
             sims_str = st.text_input('Sims', key='port_sims', disabled=_dis,
                                      help='Random weight combinations tested per lookback window. Higher is steadier '
@@ -347,22 +451,29 @@ def render_single_tab(is_mobile):
             st.warning('No baskets ticked \u2014 nothing to run.'); return
 
         errors, notes = _validate(symbols, max_wt_str, min_wt_str, min_pos_str, round_str,
-                                  min_hist_str, cost_str, sims_str, fetch_days)
+                                  min_hist_str, cost_str, sims_str, fetch_days, max_pos_str)
         for e in errors: st.error(e)
         for note in notes: st.caption(note)
         if errors: return
 
         bench = _clean_benchmarks(bench_input)
-        try: min_hist_days = int(max(0, min(20, float(min_hist_str))) * 365) if min_hist_str.strip() else 0
-        except (ValueError, TypeError): min_hist_days = 0
+        min_hist_days, auto_pick = _resolve_min_hist(symbols, fetch_days, min_hist_str)
+        if _is_auto(min_hist_str):
+            if auto_pick is None:
+                st.caption('\u24d8 Auto found no cutoff that buys a longer shared window \u2014 '
+                           'running with every symbol in.')
+            else:
+                yrs, kept, total, days, start = auto_pick
+                st.caption(f'\u24d8 Auto set Min Hist to {yrs}y: kept {kept} of {total} symbols and '
+                           f'{days:,} shared trading days from {start.date()}.')
         if is_mc:
             _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
                     direction, sims_str, max_wt_str, min_wt_str, max_vol_str, min_ret_str,
-                    txn_cost, bench, min_pos_str, round_str, min_hist_days)
+                    txn_cost, bench, min_pos_str, round_str, min_hist_days, max_pos_str)
         elif is_fs:
             _run_fs(symbols, score, rebal_label, rebal, period_label, fetch_days,
                     direction, sims_str, max_wt_str, min_wt_str, max_vol_str, min_ret_str,
-                    txn_cost, bench, min_pos_str, round_str, min_hist_days)
+                    txn_cost, bench, min_pos_str, round_str, min_hist_days, max_pos_str)
         else:
             _run_ew(symbols, rebal, fetch_days, txn_cost, rebal_label, period_label, bench, min_hist_days)
 
@@ -381,7 +492,8 @@ def render_single_tab(is_mobile):
 
 def _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
             direction, sims_str, max_wt_str, min_wt_str, max_vol_str, min_ret_str,
-            txn_cost, benchmark=(), min_pos_str='', round_str='', min_hist_days=0):
+            txn_cost, benchmark=(), min_pos_str='', round_str='', min_hist_days=0,
+            max_pos_str=''):
     try: max_wt = max(10, min(100, float(max_wt_str))) / 100.0
     except (ValueError, TypeError): max_wt = 0.50
     try: min_wt = max(0, min(50, float(min_wt_str))) / 100.0
@@ -396,6 +508,8 @@ def _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
     except (ValueError, TypeError): min_pos = 0.0
     try: round_step = max(0.1, min(25, float(round_str))) / 100.0 if round_str.strip() else 0.0
     except (ValueError, TypeError): round_step = 0.0
+    try: max_pos = max(2, int(float(max_pos_str))) if max_pos_str.strip() else 0
+    except (ValueError, TypeError): max_pos = 0
 
     allow_short = direction == 'Long/Short'
     n_syms = len(symbols)
@@ -410,7 +524,7 @@ def _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
                                  progress_bar=progress,
                                  max_vol=max_vol, min_ann_ret=min_ann_ret,
                                  benchmarks=benchmark, min_pos=min_pos, round_step=round_step,
-                                 min_history_days=min_hist_days)
+                                 min_history_days=min_hist_days, max_pos=max_pos)
     progress.empty()
 
     if not grid or not grid['results']:
@@ -430,7 +544,8 @@ def _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
         'direction': 'L/S' if allow_short else 'Long',
         'min_wt': min_wt, 'max_wt': max_wt, 'n_sims': n_sims, 'txn_cost': txn_cost,
         'max_vol': max_vol, 'min_ann_ret': min_ann_ret, 'min_pos': min_pos, 'round_step': round_step,
-        'min_hist_days': min_hist_days,
+        'min_hist_days': min_hist_days, 'max_pos': max_pos,
+        'listings': st.session_state.get('port_listings', LISTINGS[0]),
         'preset_name': preset_name,
     }
     if 'port_view_approach' in st.session_state:
@@ -448,6 +563,9 @@ def _display_mc(is_mobile, _lbl):
     constraints_str = ''
     if params.get('max_vol'): constraints_str += f" · max vol {params['max_vol']*100:.0f}%"
     if params.get('min_ann_ret'): constraints_str += f" · min ret {params['min_ann_ret']*100:.0f}%"
+    if params.get('listings') and params['listings'] != LISTINGS[0]:
+        constraints_str += f" · {params['listings'].lower()}"
+    if params.get('max_pos'): constraints_str += f" · top {params['max_pos']} names"
     if params.get('min_pos'): constraints_str += f" · drop <{params['min_pos']*100:g}%"
     if params.get('round_step'): constraints_str += f" · round to {params['round_step']*100:g}%"
     if params.get('min_hist_days'): constraints_str += f" · min hist {params['min_hist_days']/365:g}y"
@@ -509,7 +627,8 @@ def _display_mc(is_mobile, _lbl):
 
 def _run_fs(symbols, score, rebal_label, rebal, period_label, fetch_days,
             direction, sims_str, max_wt_str, min_wt_str, max_vol_str, min_ret_str,
-            txn_cost, benchmark=(), min_pos_str='', round_str='', min_hist_days=0):
+            txn_cost, benchmark=(), min_pos_str='', round_str='', min_hist_days=0,
+            max_pos_str=''):
     try: max_wt = max(10, min(100, float(max_wt_str))) / 100.0
     except (ValueError, TypeError): max_wt = 0.50
     try: min_wt = max(0, min(50, float(min_wt_str))) / 100.0
@@ -524,6 +643,8 @@ def _run_fs(symbols, score, rebal_label, rebal, period_label, fetch_days,
     except (ValueError, TypeError): min_pos = 0.0
     try: round_step = max(0.1, min(25, float(round_str))) / 100.0 if round_str.strip() else 0.0
     except (ValueError, TypeError): round_step = 0.0
+    try: max_pos = max(2, int(float(max_pos_str))) if max_pos_str.strip() else 0
+    except (ValueError, TypeError): max_pos = 0
 
     allow_short = direction == 'Long/Short'
     n_syms = len(symbols)
@@ -537,7 +658,8 @@ def _run_fs(symbols, score, rebal_label, rebal, period_label, fetch_days,
                           progress_bar=progress,
                           max_vol=max_vol, min_ann_ret=min_ann_ret,
                           rebal_months=rebal, benchmarks=benchmark, min_pos=min_pos,
-                          round_step=round_step, min_history_days=min_hist_days)
+                          round_step=round_step, min_history_days=min_hist_days,
+                          max_pos=max_pos)
     progress.empty()
 
     if not grid or not grid['results']:
@@ -557,7 +679,8 @@ def _run_fs(symbols, score, rebal_label, rebal, period_label, fetch_days,
         'direction': 'L/S' if allow_short else 'Long',
         'min_wt': min_wt, 'max_wt': max_wt, 'n_sims': n_sims, 'txn_cost': txn_cost,
         'max_vol': max_vol, 'min_ann_ret': min_ann_ret, 'min_pos': min_pos, 'round_step': round_step,
-        'min_hist_days': min_hist_days,
+        'min_hist_days': min_hist_days, 'max_pos': max_pos,
+        'listings': st.session_state.get('port_listings', LISTINGS[0]),
         'preset_name': preset_name,
     }
     if 'port_fs_view_approach' in st.session_state:
@@ -575,6 +698,9 @@ def _display_fs(is_mobile, _lbl):
     constraints_str = ''
     if params.get('max_vol'): constraints_str += f" · max vol {params['max_vol']*100:.0f}%"
     if params.get('min_ann_ret'): constraints_str += f" · min ret {params['min_ann_ret']*100:.0f}%"
+    if params.get('listings') and params['listings'] != LISTINGS[0]:
+        constraints_str += f" · {params['listings'].lower()}"
+    if params.get('max_pos'): constraints_str += f" · top {params['max_pos']} names"
     if params.get('min_pos'): constraints_str += f" · drop <{params['min_pos']*100:g}%"
     if params.get('round_step'): constraints_str += f" · round to {params['round_step']*100:g}%"
     if params.get('min_hist_days'): constraints_str += f" · min hist {params['min_hist_days']/365:g}y"

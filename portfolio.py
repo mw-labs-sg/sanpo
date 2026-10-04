@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import logging
 
-from config import THEMES, SYMBOL_NAMES, FONTS
+from config import THEMES, SYMBOL_NAMES, FONTS, drop_listing_artifacts
 # The statistics are SPREADS' definitions, imported rather than re-derived so a
 # number means the same thing on both tabs. Each carries a guard that matters:
 # ER masks unobserved intraday gaps, ROA refuses a drawdown too small to be
@@ -51,6 +51,12 @@ PORTFOLIO_APPROACHES = OrderedDict([
                           'blend': {'12mo': 1.0}, 'min_days': 252}),
     ('24mo',             {'windows': OrderedDict([('24mo', 504)]),
                           'blend': {'24mo': 1.0}, 'min_days': 504}),
+    # The fastest blend on the board, and the only one that still has something
+    # to say on a short shared window: 63 days of warm-up against 252 for the
+    # 12mo blends and 504 for the 24mo ones. Weighted the way every Recency
+    # approach is -- front-loaded onto the shortest window, decaying back.
+    ('1mo Recency',      {'windows': OrderedDict([('1mo', 21), ('2mo', 42), ('3mo', 63)]),
+                          'blend': {'1mo': 0.50, '2mo': 0.30, '3mo': 0.20}, 'min_days': 63}),
     ('12mo Avg',         {'windows': OrderedDict([('3mo', 63), ('6mo', 126), ('9mo', 189), ('12mo', 252)]),
                           'blend': {'3mo': 0.25, '6mo': 0.25, '9mo': 0.25, '12mo': 0.25}, 'min_days': 252}),
     ('12mo Recency',     {'windows': OrderedDict([('3mo', 63), ('6mo', 126), ('9mo', 189), ('12mo', 252)]),
@@ -170,7 +176,7 @@ def fetch_symbol_history(symbols_tuple, days=1800, min_history_days=0):
     if not symbols: return None, []
     note = {'n_requested': len(symbols), 'no_data': [], 'n_ok': 0,
             'union_rows': 0, 'common_rows': 0, 'start': None, 'end': None, 'limiters': [],
-            'too_new': [], 'cutoff': None}
+            'too_new': [], 'cutoff': None, 'trimmed': [], 'firsts': [], 'index': None}
     _FETCH_NOTES[(tuple(symbols_tuple), days, min_history_days)] = note
     start = (datetime.now() - pd.Timedelta(days=days)).strftime('%Y-%m-%d')
     cols = {}; valid = []
@@ -182,7 +188,15 @@ def fetch_symbol_history(symbols_tuple, days=1800, min_history_days=0):
                 closes = hist['Close'].copy()
                 closes.index = closes.index.tz_localize(None) if closes.index.tz else closes.index
                 closes.index = closes.index.normalize()
-                cols[sym] = closes.groupby(closes.index).last(); valid.append(sym)
+                closes = closes.groupby(closes.index).last()
+                # Before anything measures this series: a pre-listing placeholder
+                # price makes one impossible bar, and the optimiser will chase it.
+                closes, cut = drop_listing_artifacts(closes)
+                if cut is not None:
+                    note['trimmed'].append((sym, cut))
+                if len(closes) < 50:
+                    note['no_data'].append(sym); continue
+                cols[sym] = closes; valid.append(sym)
             else:
                 note['no_data'].append(sym)
         except Exception as e:
@@ -205,6 +219,7 @@ def fetch_symbol_history(symbols_tuple, days=1800, min_history_days=0):
     # reason a 5-year request can come back as 2 years of overlap.
     firsts = [(sym, data[sym].first_valid_index()) for sym in valid]
     firsts = [(sym, d) for sym, d in firsts if d is not None]
+    note['firsts'] = firsts; note['index'] = data.index
     common = data.dropna()
     note['common_rows'] = len(common)
     if len(common):
@@ -212,6 +227,64 @@ def fetch_symbol_history(symbols_tuple, days=1800, min_history_days=0):
         note['limiters'] = sorted(firsts, key=lambda kv: kv[1], reverse=True)[:3]
     if len(common) < 50: return None, valid
     return common, valid
+
+def min_hist_tradeoffs(notes, candidates=(1, 2, 3, 5, 7, 10)):
+    """What each Min Hist Y setting would actually cost, and buy.
+
+    "Set Min Hist Y" is not advice anyone can act on when the universe is 350
+    names pooled out of fourteen baskets: the number you want depends on which
+    listings are governing the shared window, which is the one thing you cannot
+    see. This answers it directly -- for each candidate, how many symbols
+    survive and how long the shared window becomes.
+
+    Returns [(years, n_kept, n_total, n_days, start_date)], shortest first, with
+    settings that buy nothing over the previous one left out.
+    """
+    firsts = notes.get('firsts') or []
+    idx = notes.get('index')
+    if not firsts or idx is None or not len(idx):
+        return []
+    now = pd.Timestamp.now().normalize()
+    out = []
+    for yrs in candidates:
+        cutoff = now - pd.Timedelta(days=int(yrs * 365))
+        kept = [d for _s, d in firsts if d <= cutoff]
+        if len(kept) < 2:
+            continue
+        start = max(kept)
+        days = int((idx >= start).sum())
+        if out and days <= out[-1][3]:
+            continue          # buys no more history than a looser setting
+        out.append((yrs, len(kept), len(firsts), days, start))
+    return out
+
+
+# A window shorter than this cannot feed the 12mo family of approaches, which is
+# where most of the board lives; below it you are choosing between the 3mo blends
+# and nothing. It is the bar Auto tries to clear.
+AUTO_TARGET_DAYS = 252
+
+
+def min_hist_auto(notes, fetch_days, target_days=AUTO_TARGET_DAYS):
+    """The smallest Min Hist Y that buys a workable window, or 0 to leave it be.
+
+    Prefers the LEAST exclusion that clears the target: dropping symbols is a
+    real cost, and the point is to stop two 2026 listings governing three
+    hundred names, not to prune the universe for its own sake. If nothing
+    clears the bar, take whichever setting buys the longest window, since the
+    alternative is a run that cannot happen at all.
+
+    Returns (years, n_kept, n_total, n_days, start) or None.
+    """
+    rows = [r for r in min_hist_tradeoffs(notes) if r[0] * 365 < fetch_days]
+    if not rows:
+        return None
+    current = notes.get('common_rows') or 0
+    usable = [r for r in rows if r[3] >= target_days]
+    best = usable[0] if usable else max(rows, key=lambda r: r[3])
+    # Only worth doing if it actually buys something.
+    return best if best[3] > current else None
+
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_benchmark_history(symbol, days=1800):
@@ -228,7 +301,11 @@ def fetch_benchmark_history(symbol, days=1800):
     closes = hist['Close'].copy()
     closes.index = closes.index.tz_localize(None) if closes.index.tz else closes.index
     closes.index = closes.index.normalize()
-    return closes.groupby(closes.index).last()
+    closes = closes.groupby(closes.index).last()
+    # A benchmark can be a token too, and a comparison line drawn off a
+    # placeholder price flatters or damns the portfolio for nothing.
+    closes, _cut = drop_listing_artifacts(closes)
+    return closes if closes is not None and len(closes) >= 50 else None
 
 
 def benchmark_series(symbols, fetch_days, price_index):
@@ -318,11 +395,50 @@ def _optimize_window_vectorized(returns_array, n_portfolios, n_assets, max_weigh
 
     # The row-wise twins of spreads._spread_* , one row per candidate portfolio.
     # They are the same formulas; change one and change the other.
-    def _vec_curve(pr):
-        """Equity anchored at 1.0, as in spreads._spread_curve. pr came from a
-        pct_change that already ate bar zero, so without the anchor the first
-        bar is its own running maximum and an opening loss cannot register."""
-        return np.hstack([np.ones((pr.shape[0], 1)), np.cumprod(1 + pr, axis=1)])
+    #
+    # Everything below is (n_portfolios x n_bars) -- 20MB at 5,000 sims over two
+    # years -- so the cost here is memory bandwidth, not arithmetic. The curve
+    # and the drawdown are each built ONCE per call and handed to whoever needs
+    # them; ROA and ER were previously building their own, which was a second
+    # full cumprod for nothing.
+    _shared = {}
+
+    def _curve():
+        """Equity anchored at 1.0, as in spreads._spread_curve. port_returns came
+        from a pct_change that already ate bar zero, so without the anchor the
+        first bar is its own running maximum and an opening loss cannot
+        register."""
+        if 'curve' not in _shared:
+            _shared['curve'] = np.hstack([np.ones((port_returns.shape[0], 1)),
+                                          np.cumprod(1 + port_returns, axis=1)])
+        return _shared['curve']
+
+    def _drawdown():
+        """Running drawdown off the anchored curve."""
+        if 'dd' not in _shared:
+            curve = _curve()
+            peak = np.maximum.accumulate(curve, axis=1)
+            _shared['dd'] = (curve - peak) / peak
+        return _shared['dd']
+
+    def _median_abs_bar():
+        """Median |bar| per candidate, the scale ROA's floor is measured in.
+
+        np.median copies the array and partitions the copy, so at this size it
+        is two more 20MB allocations per call. abs() writes into one buffer and
+        the partition then runs in place on it, which is the same number down to
+        the last bit for about 60% of the time."""
+        if 'med' not in _shared:
+            buf = np.abs(port_returns)
+            n_bars = buf.shape[1]
+            k = n_bars // 2
+            if n_bars % 2:
+                buf.partition(k, axis=1)
+                _shared['med'] = buf[:, k].copy()
+            else:
+                buf.partition([k - 1, k], axis=1)
+                _shared['med'] = (buf[:, k - 1] + buf[:, k]) / 2.0
+        return _shared['med']
 
     def _vec_downside_vol(pr):
         """RMS of min(r, 0) over EVERY bar, as in spreads._spread_sortino.
@@ -332,9 +448,7 @@ def _optimize_window_vectorized(returns_array, n_portfolios, n_assets, max_weigh
         return np.sqrt(np.mean(neg**2, axis=1)) * np.sqrt(252)
 
     def _vec_avg_dd(pr):
-        curve = _vec_curve(pr)
-        peak = np.maximum.accumulate(curve, axis=1)
-        dd = (curve - peak) / peak
+        dd = _drawdown()
         neg_dd = np.where(dd < 0, dd, 0)
         n_neg = np.maximum(np.sum(dd < 0, axis=1).astype(float), 1)
         return np.sum(neg_dd, axis=1) / n_neg
@@ -343,11 +457,10 @@ def _optimize_window_vectorized(returns_array, n_portfolios, n_assets, max_weigh
         """Total return over the worst hole. Refuses to score a candidate whose
         worst drawdown is under one typical bar of its own movement -- that is
         not a portfolio avoiding a hole, it is too few bars to have had one."""
-        curve = _vec_curve(pr)
-        peak = np.maximum.accumulate(curve, axis=1)
-        mdd = ((curve - peak) / peak).min(axis=1) * 100.0
+        curve = _curve()
+        mdd = _drawdown().min(axis=1) * 100.0
         total = (curve[:, -1] - 1.0) * 100.0
-        floor = np.maximum(MIN_DD_PCT, np.median(np.abs(pr), axis=1) * 100.0)
+        floor = np.maximum(MIN_DD_PCT, _median_abs_bar() * 100.0)
         denom = np.where(np.abs(mdd) > 0, np.abs(mdd), 1.0)
         return np.where(np.abs(mdd) < floor, 0.0,
                         np.clip(total / denom, -MAX_RATIO, MAX_RATIO))
@@ -356,7 +469,7 @@ def _optimize_window_vectorized(returns_array, n_portfolios, n_assets, max_weigh
         """Kaufman efficiency ratio, signed: |net move| / path length. 1.0 is a
         straight line, 0.0 is chop that goes nowhere. No gap mask here -- these
         are daily bars, where a weekend is not an unobserved gap."""
-        d = np.diff(_vec_curve(pr), axis=1)
+        d = np.diff(_curve(), axis=1)
         path = np.abs(d).sum(axis=1)
         net = d.sum(axis=1)
         er = np.where(path > 0, np.abs(net) / np.where(path > 0, path, 1.0), 0.0)
@@ -378,6 +491,10 @@ def _optimize_window_vectorized(returns_array, n_portfolios, n_assets, max_weigh
     elif score_type == 'ER':
         scores = _vec_er(port_returns)
     elif score_type == 'R²':
+        # Its own cumprod on purpose. Slicing the shared anchored curve would
+        # give the right numbers off a non-contiguous view, and the regression
+        # below then reads it column-wise -- measured 10% SLOWER than just
+        # building the contiguous array it wants.
         cum = np.cumprod(1 + port_returns, axis=1)
         n = cum.shape[1]; x = np.arange(n, dtype=float); xm = x.mean()
         ss_xx = np.sum(x * x) - n * xm * xm
@@ -420,6 +537,41 @@ def _optimize_window_vectorized(returns_array, n_portfolios, n_assets, max_weigh
 # WALK-FORWARD ENGINE
 # =============================================================================
 
+def _cap_to_max_weight(w, max_weight):
+    """Pull anything over the ceiling back to it and push the excess onto the
+    names that still have room.
+
+    The obvious loop -- clip, then rescale back to 100% -- barely converges when
+    a holding is already sitting ON the ceiling: the rescale lifts it straight
+    back over, so each pass claws back a few basis points and five passes are
+    nowhere near enough. Concentrating 12 names into 5 left a book of 12.
+
+    Moving the excess sideways instead keeps the sum at 100% by construction, so
+    there is nothing to rescale and it lands in a pass or two. Returns None when
+    the ceiling genuinely cannot hold the whole portfolio -- every name pinned
+    and still short of 100% -- which is the caller's cue to leave it alone.
+    """
+    out = np.asarray(w, dtype=float).copy()
+    for _ in range(50):
+        over = np.abs(out) > max_weight + 1e-12
+        if not over.any():
+            return out
+        excess = float(np.sum(out[over] - np.sign(out[over]) * max_weight))
+        out[over] = np.sign(out[over]) * max_weight
+        # Only onto names that are ALREADY held. Both callers get here by sending
+        # weights to exactly zero -- dust in one case, everything outside the top
+        # N in the other -- and a zero has the most headroom of anything in the
+        # vector, so ignoring this handed the excess straight back to the names
+        # that were just dropped: Max Pos 5 returned a book of 7.
+        room = (~over) & (out != 0.0)
+        headroom = np.maximum(max_weight - np.abs(out), 0.0) * room
+        total_room = float(headroom.sum())
+        if total_room <= 1e-12:
+            return None
+        out = out + excess * headroom / total_room
+    return out if not np.any(np.abs(out) > max_weight + 1e-9) else None
+
+
 def _apply_min_pos(w, min_pos, max_weight=None):
     """Drop positions smaller than min_pos and rescale the survivors back to 100%.
     Unlike min_weight (a floor that forces every asset in), this removes dust:
@@ -431,14 +583,45 @@ def _apply_min_pos(w, min_pos, max_weight=None):
     total = out.sum()
     if total <= 0: return w
     out = out / total
-    # Rescaling can lift a survivor past the max weight; clip it back a few times.
+    # Rescaling the survivors can lift one past the ceiling; spread the excess
+    # over the names that still have room rather than rescale a second time.
     if max_weight:
-        for _ in range(5):
-            if not np.any(np.abs(out) > max_weight): break
-            out = np.clip(out, -max_weight, max_weight)
-            total = out.sum()
-            if total <= 0: return w
-            out = out / total
+        capped = _cap_to_max_weight(out, max_weight)
+        if capped is None: return w
+        out = capped
+    return out
+
+
+def _apply_max_pos(w, max_pos, max_weight=None):
+    """Keep only the MAX_POS largest holdings and rescale them back to 100%.
+
+    Min Pos % cuts by size, which is the wrong tool once the universe is 350
+    names pooled out of fourteen baskets: whatever threshold you pick, the
+    number of positions that survives is whatever it happens to be. This caps
+    the count directly, so "twenty names" means twenty names.
+
+    Ranked on |weight|, so it does the right thing in Long/Short: a conviction
+    short is a position worth keeping, not a small number to discard. Ties break
+    by position -- arbitrary, but stable, so the same weights always give the
+    same book.
+    """
+    if not max_pos or max_pos <= 0: return w
+    if int(np.sum(np.abs(w) > 0)) <= max_pos: return w
+    keep = np.argsort(-np.abs(w), kind='stable')[:int(max_pos)]
+    out = np.zeros_like(w)
+    out[keep] = w[keep]
+    total = out.sum()
+    if total <= 0: return w
+    out = out / total
+    # Concentrating into fewer names pushes the survivors up, which can carry one
+    # past the ceiling. None back means no book of this many names both sums to
+    # 100% and fits under Max Wt -- hand the uncapped one back rather than a
+    # levered book nobody asked for. _validate rejects the settings that cause
+    # it, so in practice this is the Long/Short case where the kept names cancel.
+    if max_weight:
+        capped = _cap_to_max_weight(out, max_weight)
+        if capped is None: return w
+        out = capped
     return out
 
 
@@ -464,7 +647,8 @@ def _round_weights(w, step):
 
 
 def _optimize_at_rebalance(returns_df, approach, score_type, n_portfolios, mw, mnw=0.0, allow_short=False,
-                           max_vol=None, min_ann_ret=None, window_cache=None, min_pos=0.0, round_step=0.0):
+                           max_vol=None, min_ann_ret=None, window_cache=None, min_pos=0.0, round_step=0.0,
+                           max_pos=0):
     n_assets = returns_df.shape[1]; data_len = len(returns_df)
     window_weights_list = []; blend_wts = []
     for wname, wdays in approach['windows'].items():
@@ -484,13 +668,18 @@ def _optimize_at_rebalance(returns_df, approach, score_type, n_portfolios, mw, m
     all_w = np.array(window_weights_list)
     opt_w = np.average(all_w, axis=0, weights=blend_wts)
     opt_w /= opt_w.sum()
-    return _round_weights(_apply_min_pos(opt_w, min_pos, mw), round_step)
+    # Dust first, then the count cap, then the rounding step: Min Pos drops the
+    # slivers that would otherwise occupy slots in the top N, and rounding has to
+    # come last or it cannot guarantee the weights still add to 100%.
+    opt_w = _apply_max_pos(_apply_min_pos(opt_w, min_pos, mw), max_pos, mw)
+    return _round_weights(opt_w, round_step)
 
 
 def _walk_forward_single(returns_df, approach, score_type, rebal_months,
                          n_portfolios=10000, max_weight=0.50, min_weight=0.0,
                          txn_cost=0.001, allow_short=False,
-                         max_vol=None, min_ann_ret=None, window_cache=None, min_pos=0.0, round_step=0.0):
+                         max_vol=None, min_ann_ret=None, window_cache=None, min_pos=0.0, round_step=0.0,
+                         max_pos=0):
     n_assets = returns_df.shape[1]; mw = max_weight; mnw = min_weight
     min_is_days = max(approach['windows'].values()); dates = returns_df.index
 
@@ -528,7 +717,7 @@ def _walk_forward_single(returns_df, approach, score_type, rebal_months,
         is_data = returns_df.iloc[:ri + 1]
         opt_w = _optimize_at_rebalance(is_data, approach, score_type, n_portfolios, mw, mnw, allow_short,
                                         max_vol=max_vol, min_ann_ret=min_ann_ret, window_cache=window_cache,
-                                        min_pos=min_pos, round_step=round_step)
+                                        min_pos=min_pos, round_step=round_step, max_pos=max_pos)
         if opt_w is None: continue
         oos_start = ri + 1
         oos_end = rebal_dates[i + 1][0] if i + 1 < len(rebal_dates) else len(dates)
@@ -546,7 +735,7 @@ def _walk_forward_single(returns_df, approach, score_type, rebal_months,
     if not oos_segments or len(weight_history) < 2: return None
     current_w = _optimize_at_rebalance(returns_df, approach, score_type, n_portfolios, mw, mnw, allow_short,
                                         max_vol=max_vol, min_ann_ret=min_ann_ret, window_cache=window_cache,
-                                        min_pos=min_pos, round_step=round_step)
+                                        min_pos=min_pos, round_step=round_step, max_pos=max_pos)
     if current_w is None: current_w = weight_history[-1]['weights']
     full_oos = pd.concat(oos_segments)
     return {'oos_returns': full_oos, 'weight_history': weight_history,
@@ -609,7 +798,7 @@ def run_walkforward_grid(symbols, score_type='Win Rate', rebal_months=3, n_portf
                          fetch_days=1800, max_weight=0.50, min_weight=0.0,
                          txn_cost=0.001, allow_short=False, progress_bar=None,
                          max_vol=None, min_ann_ret=None, benchmarks=None, min_pos=0.0, round_step=0.0,
-                         min_history_days=0):
+                         min_history_days=0, max_pos=0):
     data, valid = fetch_symbol_history(tuple(symbols), days=fetch_days, min_history_days=min_history_days)
     if data is None or len(valid) < 2: return None
     returns = data.pct_change().dropna(); n_assets = len(valid)
@@ -654,7 +843,8 @@ def run_walkforward_grid(symbols, score_type='Win Rate', rebal_months=3, n_portf
             wf = _walk_forward_single(returns, approach, score_type, rebal_months,
                                       n_portfolios, max_weight, min_weight, txn_cost, allow_short,
                                       max_vol=max_vol, min_ann_ret=min_ann_ret,
-                                      window_cache=window_cache, min_pos=min_pos, round_step=round_step)
+                                      window_cache=window_cache, min_pos=min_pos, round_step=round_step,
+                                      max_pos=max_pos)
             if wf is not None:
                 metrics = _calc_oos_metrics(wf['oos_returns'])
                 if metrics is not None:
@@ -690,7 +880,7 @@ def run_fullsample(symbols, score_type='Win Rate', n_portfolios=10000,
                    fetch_days=1800, max_weight=0.50, min_weight=0.0,
                    txn_cost=0.001, allow_short=False, progress_bar=None,
                    max_vol=None, min_ann_ret=None, rebal_months=3, benchmarks=None, min_pos=0.0,
-                   round_step=0.0, min_history_days=0):
+                   round_step=0.0, min_history_days=0, max_pos=0):
     """Run MC optimization on full dataset — no walk-forward split.
     Tests all PORTFOLIO_APPROACHES lookback windows that fit in the data,
     returns weights + in-sample backtest for each."""
@@ -751,7 +941,7 @@ def run_fullsample(symbols, score_type='Win Rate', n_portfolios=10000,
                                            max_weight, min_weight, allow_short,
                                            max_vol=max_vol, min_ann_ret=min_ann_ret,
                                            window_cache=window_cache, min_pos=min_pos,
-                                           round_step=round_step)
+                                           round_step=round_step, max_pos=max_pos)
             if opt_w is None:
                 continue
 
@@ -945,7 +1135,13 @@ def render_weights_table(grid, approach_name):
     wf = grid['results'][approach_name]['wf']
     syms = grid['symbols']; w = wf['current_weights']
     n_assets = len(syms); eq_w = 1.0 / n_assets
-    sorted_idx = np.argsort(-w)
+    # Held names only. Max Pos, Min Pos % and Round % all work by sending weights
+    # to exactly 0, so a 323-symbol universe capped at 20 names used to print the
+    # book followed by 303 rows of "0.0%" -- the part you trade buried in the
+    # part you do not. Ranked on |weight| so a short sorts by size, not sign.
+    held = [i for i in np.argsort(-np.abs(w)) if abs(w[i]) > 5e-5]
+    n_dropped = n_assets - len(held)
+    sorted_idx = held if held else list(np.argsort(-w))
 
     html = f"<div style='overflow-x:auto;border:1px solid {C_BORDER};border-radius:6px'><table style='border-collapse:collapse;font-family:{FONTS};font-size:11px;width:100%;line-height:1.3'>"
     html += f"<thead><tr><th style='{TH}text-align:left'>Asset</th><th style='{TH}text-align:left;width:60px'>Ticker</th>"
@@ -973,7 +1169,9 @@ def render_weights_table(grid, approach_name):
     html += f"<tr style='border-top:2px solid {C_BORDER}'>"
     html += f"<td style='{TD}color:{C_TXT};font-weight:700'>TOTAL</td><td style='{TD}'></td>"
     html += f"<td style='{TD}text-align:right;color:{C_TXT};font-weight:700'>{np.sum(w)*100:.1f}%</td>"
-    html += f"<td colspan='2' style='{TD}color:{C_MUTE};font-size:10px'>Optimized on all data through today</td></tr>"
+    tail = (f"{len(held)} of {n_assets} names held · {n_dropped} at 0% not shown · "
+            if n_dropped else '')
+    html += f"<td colspan='2' style='{TD}color:{C_MUTE};font-size:10px'>{tail}Optimized on all data through today</td></tr>"
     html += "</tbody></table></div>"
     st.markdown(html, unsafe_allow_html=True)
 
