@@ -1335,6 +1335,7 @@ def _section(title, subtitle=''):
 def render_portfolio_tab(is_mobile):
     from portfolio_single import render_single_tab
     from portfolio_all import render_all_tab
+    from portfolio_sweep import render_sweep_tab
 
     # Green underline on nested sub-tabs only
     st.markdown(f"""<style>
@@ -1356,10 +1357,13 @@ def render_portfolio_tab(is_mobile):
         }}
     </style>""", unsafe_allow_html=True)
 
-    tab_single, tab_all = st.tabs(['Single', 'All'])
+    tab_single, tab_all, tab_sweep = st.tabs(['Single', 'All', 'Optimal'])
 
     with tab_single:
         render_single_tab(is_mobile)
 
     with tab_all:
         render_all_tab(is_mobile)
+
+    with tab_sweep:
+        render_sweep_tab(is_mobile)
