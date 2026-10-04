@@ -1002,6 +1002,50 @@ def run_fullsample(symbols, score_type='Win Rate', n_portfolios=10000,
             'bench_symbols': [b[0] for b in bench], 'bench_failed': bench_failed,
             'score_type': score_type, 'rebal_months': rebal_months, 'txn_cost': txn_cost}
 
+def sweep_configs(symbols, objectives, rebalances, period_days, n_sims, max_wt, min_wt,
+                   txn_cost, allow_short, max_pos, min_hist_days,
+                   progress=None, engine=None):
+    """One walk-forward grid per (objective, rebalance). Each call sweeps the
+    eleven lookbacks itself, so the third dimension comes free with the second.
+
+    Rows carry the span they were scored over, because they genuinely differ:
+    a weekly rebalance starts trading sooner than an annual one, so it banks a
+    longer out-of-sample record on identical data.
+    """
+    engine = engine or run_walkforward_grid
+    rows = []
+    combos = [(o, r) for o in objectives for r in rebalances]
+    for i, (obj, rebal_label) in enumerate(combos):
+        if progress:
+            progress.progress((i + 1) / len(combos), text=f'{obj} · {rebal_label}')
+        try:
+            grid = engine(
+                symbols, score_type=obj, rebal_months=REBAL_OPTIONS[rebal_label],
+                fetch_days=period_days, n_portfolios=n_sims,
+                max_weight=max_wt, min_weight=min_wt, txn_cost=txn_cost,
+                allow_short=allow_short, max_pos=max_pos,
+                min_history_days=min_hist_days)
+            if not grid or not grid['results']:
+                continue
+            # Each cell is judged by the objective it was optimised for -- that is
+            # the question being asked. Ranking every cell on one metric would
+            # just rediscover which objective most resembles that metric.
+            name = best_approach(grid['results'], SCORE_TO_RANK.get(obj, 'win_rate'))
+            m = dict(grid['results'][name]['metrics'])
+            m['objective'] = obj
+            m['rebal'] = rebal_label
+            m['lookback'] = name
+            m['weights'] = grid['results'][name]['wf']['current_weights']
+            m['symbols'] = grid['symbols']
+            rows.append(m)
+        except Exception as e:
+            logger.warning(f'sweep {obj}/{rebal_label}: {e}')
+    if progress:
+        progress.empty()
+    return rows
+
+
+
 # =============================================================================
 # DISPLAY: RANKING TABLE
 # =============================================================================

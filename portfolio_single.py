@@ -1,3 +1,5 @@
+import logging
+
 import streamlit as st
 import numpy as np
 import pandas as pd
@@ -7,7 +9,7 @@ from config import (FUTURES_GROUPS, THEMES, SYMBOL_NAMES, FONTS, clean_symbol,
 from portfolio import (C_MUTE, C_BG, C_TXT, C_TXT2, C_GOLD, BENCH_COLORS, MAX_BENCHMARKS, _tint,
                        REBAL_OPTIONS, PERIOD_OPTIONS, SCORE_TO_RANK, OBJECTIVES,
                        fetch_symbol_history, fetch_notes, min_hist_frontier, min_hist_auto,
-                       min_hist_days_for,
+                       min_hist_days_for, sweep_configs, composite_ranks, rank_rows,
                        benchmark_series, _bench_metrics, _calc_oos_metrics,
                        run_walkforward_grid, run_fullsample,
                        render_ranking_table,
@@ -17,11 +19,26 @@ from portfolio import (C_MUTE, C_BG, C_TXT, C_TXT2, C_GOLD, BENCH_COLORS, MAX_BE
 # uses -- one picker, one meaning of "basket", wherever you are.
 from spreads import basket_picker
 
+logger = logging.getLogger(__name__)
+
 
 # A basket like Electrical is two thirds Tokyo, Seoul and Taipei listings. They
 # are real holdings, but they are also the ones you may not be able to trade,
 # and they keep their own holidays, which shortens the window everyone shares.
 LISTINGS = ['All listings', 'US only', 'Non-US only']
+
+# Auto turns the two settings you would otherwise have to guess at into a search.
+# Both lists keep every explicit option, so locking one and searching the other
+# is a normal thing to do -- Auto objective at a rebalance you can actually
+# operate is probably the most useful combination on the tab.
+AUTO = 'Auto'
+AUTO_OBJECTIVES = [AUTO] + OBJECTIVES
+AUTO_REBALANCES = [AUTO] + list(REBAL_OPTIONS.keys())
+
+# The search runs at reduced Sims and the winner is re-run at the real number:
+# ranking configurations takes far fewer draws than settling the last basis
+# point of a weight, and the full 9 x 6 grid at 10,000 sims is a coffee break.
+SEARCH_SIMS = 2000
 
 
 def _pool(picked):
@@ -83,6 +100,63 @@ def _suggest_min_hist(notes, fetch_days):
             for dropped, _kept, _total, days, cutoff in rows if dropped]
     if bits:
         st.caption('To buy a longer window &mdash; ' + ' &nbsp;·&nbsp; '.join(bits))
+
+
+def _best_ew_rebalance(symbols, fetch_days, txn_cost, min_hist_days):
+    """Equal weight has no objective to search, so Auto only has to settle the
+    rebalance -- and that needs no Monte Carlo at all, just the N equity curves.
+    """
+    from portfolio_all import _compute_ew_returns
+    rows = []
+    for label, months in REBAL_OPTIONS.items():
+        try:
+            ret, valid = _compute_ew_returns(symbols, fetch_days, months, txn_cost)
+            if ret is None or len(ret) < 20:
+                continue
+            m = _calc_oos_metrics(ret)
+            if m is None:
+                continue
+            m['rebal'] = label
+            rows.append(m)
+        except Exception as e:
+            logger.warning(f'EW rebalance sweep {label}: {e}')
+    if not rows:
+        return 'Monthly', 'Auto could not score the rebalance frequencies; used Monthly.'
+    composite_ranks(rows)
+    best = rank_rows(rows, '_score', reverse=False)[0]
+    return best['rebal'], (f'Auto compared {len(rows)} rebalance frequencies and chose '
+                           f'{best["rebal"]} — best length-adjusted Composite.')
+
+
+def _resolve_auto(symbols, score, rebal_label, period_days, n_sims, max_wt, min_wt,
+                  txn_cost, allow_short, max_pos, min_hist_days, engine):
+    """Search whichever of Objective / Rebalance is set to Auto.
+
+    Returns (score, rebal_label, note). Only the Auto'd dimension is searched --
+    lock one and it stays locked. Scored on the length-adjusted Composite, which
+    is the whole point: the candidates genuinely differ in how long they traded,
+    so the raw numbers are not comparable.
+    """
+    objs = OBJECTIVES if score == AUTO else [score]
+    rebs = list(REBAL_OPTIONS.keys()) if rebal_label == AUTO else [rebal_label]
+    n = len(objs) * len(rebs)
+    progress = st.progress(0, text=f'Searching {n} configurations...')
+    rows = sweep_configs(symbols, objs, rebs, period_days, min(n_sims, SEARCH_SIMS),
+                         max_wt, min_wt, txn_cost, allow_short, max_pos, min_hist_days,
+                         progress, engine=engine)
+    if not rows:
+        return (objs[0], rebs[0],
+                'Auto found no configuration that produced a usable walk-forward; '
+                f'fell back to {objs[0]} / {rebs[0]}.')
+    composite_ranks(rows)
+    best = rank_rows(rows, '_score', reverse=False)[0]
+    what = ' and '.join(w for w, on in
+                        [('Objective', score == AUTO), ('Rebalance', rebal_label == AUTO)] if on)
+    return best['objective'], best['rebal'], (
+        f'Auto searched {len(rows)} configuration{"s" if len(rows) != 1 else ""} at '
+        f'{min(n_sims, SEARCH_SIMS):,} sims and set {what} to '
+        f'{best["objective"]} / {best["rebal"]} — best length-adjusted Composite '
+        f'of the set, on {best["oos_years"]}y out of sample.')
 
 
 def _fetch_failure(symbols, fetch_days, what, min_hist_days=0):
@@ -338,8 +412,14 @@ def render_single_tab(is_mobile):
     _group('HOW TO TEST', 'what the optimiser aims at, and over what history')
     b1, b2, b3, b4 = st.columns(4)
     with b1:
-        score = st.selectbox('Objective', OBJECTIVES, key='port_score', disabled=_dis,
+        # Composite, not Auto: a search is worth opting into, not something every
+        # run should do by surprise.
+        score = st.selectbox('Objective', AUTO_OBJECTIVES, index=1, key='port_score',
+                             disabled=_dis,
                              help='What the optimiser maximises, and what the ranking table then sorts on \u2014 the '
+                                  'same nine SPREADS offers. Auto searches them instead of making you pick: it runs '
+                                  'the lot at reduced Sims, takes the one with the best length-adjusted Composite, '
+                                  'then re-runs the winner at full Sims. '
                                   'same nine SPREADS offers. Composite is the average rank across Sharpe, Sortino, '
                                   'ROA and ER, each discounted by the square root of the window length so an '
                                   'approach that burned a long warm-up cannot win on the short sample left over. '
@@ -349,9 +429,12 @@ def render_single_tab(is_mobile):
                                   'drawdown. R\u00b2 = straightness again, fitted. Total Return = raw growth. '
                                   'Win Rate = share of up days.')
     with b2:
-        rebal_label = st.selectbox('Rebalance', list(REBAL_OPTIONS.keys()), index=2, key='port_rebal',
-                                   help='How often holdings are reset to target weights. Every reset pays Cost % on what '
-                                        'it trades, so more frequent is not automatically better.')
+        rebal_label = st.selectbox('Rebalance', AUTO_REBALANCES, index=3, key='port_rebal',
+                                   help='How often holdings are reset to target weights. Every reset pays Cost % on '
+                                        'what it trades, so more frequent is not automatically better. Auto searches '
+                                        'them the same way Objective does — and it is scored length-adjusted, '
+                                        'because a weekly rebalance starts trading sooner than an annual one and '
+                                        'banks a longer out-of-sample record on identical data.')
     with b3:
         period_label = st.selectbox('Period', list(PERIOD_OPTIONS.keys()), index=2, key='port_period',
                                     help='How much price history to pull. Longer gives more to learn from and a longer '
@@ -472,6 +555,34 @@ def render_single_tab(is_mobile):
                            f'{"s" if dropped != 1 else ""} of {total} \u2014 anything after '
                            f'{cutoff.date()} \u2014 which takes the shared window to '
                            f'{days:,} trading days across {kept} symbols.')
+        # Resolve Auto before anything is optimised for real. The search runs the
+        # candidates at reduced Sims; only the winner gets the full number.
+        if score == AUTO or rebal_label == AUTO:
+            if _dis:
+                # Equal Weight has no objective to search, and its rebalance is
+                # cheap enough to settle by simply computing each one.
+                score = OBJECTIVES[0] if score == AUTO else score
+                if rebal_label == AUTO:
+                    rebal_label, note = _best_ew_rebalance(symbols, fetch_days, txn_cost,
+                                                           min_hist_days)
+                    st.caption(f'ⓘ {note}')
+                    rebal = REBAL_OPTIONS[rebal_label]
+            else:
+                try: _mw = max(10, min(100, float(max_wt_str))) / 100.0
+                except (ValueError, TypeError): _mw = 0.50
+                try: _nw = max(0, min(50, float(min_wt_str))) / 100.0
+                except (ValueError, TypeError): _nw = 0.0
+                try: _mp = max(2, int(float(max_pos_str))) if max_pos_str.strip() else 0
+                except (ValueError, TypeError): _mp = 0
+                try: _ns = max(1000, min(100000, int(sims_str)))
+                except (ValueError, TypeError): _ns = 10000
+                score, rebal_label, note = _resolve_auto(
+                    symbols, score, rebal_label, fetch_days, _ns, _mw, _nw, txn_cost,
+                    direction == 'Long/Short', _mp, min_hist_days,
+                    run_fullsample if is_fs else run_walkforward_grid)
+                st.caption(f'ⓘ {note}')
+                rebal = REBAL_OPTIONS[rebal_label]
+
         if is_mc:
             _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
                     direction, sims_str, max_wt_str, min_wt_str, max_vol_str, min_ret_str,

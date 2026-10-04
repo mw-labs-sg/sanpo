@@ -19,8 +19,8 @@ import streamlit as st
 
 from config import THEMES, FONTS, filter_listings
 from portfolio import (OBJECTIVES, REBAL_OPTIONS, PERIOD_OPTIONS, SCORE_TO_RANK,
-                       LOWER_IS_BETTER, composite_ranks, best_approach, rank_rows,
-                       run_walkforward_grid, _section, C_MUTE)
+                       LOWER_IS_BETTER, composite_ranks, rank_rows,
+                       sweep_configs, _section, C_MUTE)
 from portfolio_single import LISTINGS, _pool, _resolve_min_hist
 from spreads import basket_picker
 
@@ -29,47 +29,6 @@ logger = logging.getLogger(__name__)
 # Beyond this the sweep is minutes rather than seconds, and it is worth saying so
 # before the click rather than after.
 BUSY_RUNS = 24
-
-
-def _run_sweep(symbols, objectives, rebalances, period_days, n_sims, max_wt, min_wt,
-               txn_cost, allow_short, max_pos, min_hist_days, progress=None):
-    """One walk-forward grid per (objective, rebalance). Each call sweeps the
-    eleven lookbacks itself, so the third dimension comes free with the second.
-
-    Rows carry the span they were scored over, because they genuinely differ:
-    a weekly rebalance starts trading sooner than an annual one, so it banks a
-    longer out-of-sample record on identical data.
-    """
-    rows = []
-    combos = [(o, r) for o in objectives for r in rebalances]
-    for i, (obj, rebal_label) in enumerate(combos):
-        if progress:
-            progress.progress((i + 1) / len(combos), text=f'{obj} · {rebal_label}')
-        try:
-            grid = run_walkforward_grid(
-                symbols, score_type=obj, rebal_months=REBAL_OPTIONS[rebal_label],
-                fetch_days=period_days, n_portfolios=n_sims,
-                max_weight=max_wt, min_weight=min_wt, txn_cost=txn_cost,
-                allow_short=allow_short, max_pos=max_pos,
-                min_history_days=min_hist_days)
-            if not grid or not grid['results']:
-                continue
-            # Each cell is judged by the objective it was optimised for -- that is
-            # the question being asked. Ranking every cell on one metric would
-            # just rediscover which objective most resembles that metric.
-            name = best_approach(grid['results'], SCORE_TO_RANK.get(obj, 'win_rate'))
-            m = dict(grid['results'][name]['metrics'])
-            m['objective'] = obj
-            m['rebal'] = rebal_label
-            m['lookback'] = name
-            m['weights'] = grid['results'][name]['wf']['current_weights']
-            m['symbols'] = grid['symbols']
-            rows.append(m)
-        except Exception as e:
-            logger.warning(f'sweep {obj}/{rebal_label}: {e}')
-    if progress:
-        progress.empty()
-    return rows
 
 
 def _heatmap(rows, objectives, rebalances, metric, theme):
@@ -264,7 +223,7 @@ def render_sweep_tab(is_mobile):
                        f'{cutoff.date()} — for a shared window of {days:,} trading days.')
 
         progress = st.progress(0, text='Sweeping...')
-        rows = _run_sweep(symbols, sweep_objs, sweep_rebals, period_days, n_sims,
+        rows = sweep_configs(symbols, sweep_objs, sweep_rebals, period_days, n_sims,
                           max_wt, min_wt, txn_cost, direction == 'Long/Short',
                           max_pos, min_hist_days, progress)
         if not rows:
