@@ -10,6 +10,7 @@ from portfolio import (C_MUTE, C_BG, C_TXT, C_TXT2, C_GOLD, BENCH_COLORS, MAX_BE
                        REBAL_OPTIONS, PERIOD_OPTIONS, SCORE_TO_RANK, OBJECTIVES,
                        fetch_symbol_history, fetch_notes, min_hist_frontier, min_hist_auto,
                        min_hist_days_for, sweep_configs, composite_ranks, rank_rows,
+                       UNIVERSES, UNIVERSE_SHARED,
                        benchmark_series, _bench_metrics, _calc_oos_metrics,
                        run_walkforward_grid, run_fullsample,
                        render_ranking_table,
@@ -129,7 +130,8 @@ def _best_ew_rebalance(symbols, fetch_days, txn_cost, min_hist_days):
 
 
 def _resolve_auto(symbols, score, rebal_label, period_days, n_sims, max_wt, min_wt,
-                  txn_cost, allow_short, max_pos, min_hist_days, engine):
+                  txn_cost, allow_short, max_pos, min_hist_days, engine,
+                  universe=UNIVERSE_SHARED):
     """Search whichever of Objective / Rebalance is set to Auto.
 
     Returns (score, rebal_label, note). Only the Auto'd dimension is searched --
@@ -143,7 +145,7 @@ def _resolve_auto(symbols, score, rebal_label, period_days, n_sims, max_wt, min_
     progress = st.progress(0, text=f'Searching {n} configurations...')
     rows = sweep_configs(symbols, objs, rebs, period_days, min(n_sims, SEARCH_SIMS),
                          max_wt, min_wt, txn_cost, allow_short, max_pos, min_hist_days,
-                         progress, engine=engine)
+                         progress, engine=engine, universe=universe)
     if not rows:
         return (objs[0], rebs[0],
                 'Auto found no configuration that produced a usable walk-forward; '
@@ -410,7 +412,7 @@ def render_single_tab(is_mobile):
 
     # ---------------------------------------------------------------- how to test
     _group('HOW TO TEST', 'what the optimiser aims at, and over what history')
-    b1, b2, b3, b4 = st.columns(4)
+    b1, b2, b3, b4, b5 = st.columns(5)
     with b1:
         # Composite, not Auto: a search is worth opting into, not something every
         # run should do by surprise.
@@ -436,10 +438,21 @@ def render_single_tab(is_mobile):
                                         'because a weekly rebalance starts trading sooner than an annual one and '
                                         'banks a longer out-of-sample record on identical data.')
     with b3:
+        universe = st.selectbox('Universe', UNIVERSES, key='port_universe',
+                                help='How the universe is assembled over time. As listed keeps a '
+                                     'symbol out until it has enough history to be scored, then '
+                                     'adds it at the next rebalance — nothing is discarded '
+                                     'for being late and no single 2024 listing governs the '
+                                     'window. Shared window is the strict test: every symbol must '
+                                     'have a price on every day, which is cleaner to reason about '
+                                     'and throws away most of the history. Full Sample always '
+                                     'uses Shared window, because one fixed weight vector cannot '
+                                     'be carried through a period a symbol did not exist for.')
+    with b4:
         period_label = st.selectbox('Period', list(PERIOD_OPTIONS.keys()), index=2, key='port_period',
                                     help='How much price history to pull. Longer gives more to learn from and a longer '
                                          'backtest, but drags in older market regimes.')
-    with b4:
+    with b5:
         direction = st.selectbox('Direction', ['Long Only', 'Long/Short'], key='port_direction', disabled=_dis,
                                  help='Long Only keeps every weight at 0 or above. Long/Short allows negative weights, '
                                       'so the portfolio can short (Min Wt % is ignored then).')
@@ -579,17 +592,19 @@ def render_single_tab(is_mobile):
                 except (ValueError, TypeError): _mp = 0
                 try: _ns = max(1000, min(100000, int(sims_str)))
                 except (ValueError, TypeError): _ns = 10000
+                _engine = run_fullsample if is_fs else run_walkforward_grid
                 score, rebal_label, note = _resolve_auto(
                     symbols, score, rebal_label, fetch_days, _ns, _mw, _nw, txn_cost,
-                    direction == 'Long/Short', _mp, min_hist_days,
-                    run_fullsample if is_fs else run_walkforward_grid)
+                    direction == 'Long/Short', _mp, min_hist_days, _engine,
+                    UNIVERSE_SHARED if is_fs else universe)
                 st.caption(f'ⓘ {note}')
                 rebal = REBAL_OPTIONS[rebal_label]
 
         if is_mc:
             _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
                     direction, sims_str, max_wt_str, min_wt_str, max_vol_str, min_ret_str,
-                    txn_cost, bench, min_pos_str, round_str, min_hist_days, max_pos_str)
+                    txn_cost, bench, min_pos_str, round_str, min_hist_days, max_pos_str,
+                    universe)
         elif is_fs:
             _run_fs(symbols, score, rebal_label, rebal, period_label, fetch_days,
                     direction, sims_str, max_wt_str, min_wt_str, max_vol_str, min_ret_str,
@@ -613,7 +628,7 @@ def render_single_tab(is_mobile):
 def _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
             direction, sims_str, max_wt_str, min_wt_str, max_vol_str, min_ret_str,
             txn_cost, benchmark=(), min_pos_str='', round_str='', min_hist_days=0,
-            max_pos_str=''):
+            max_pos_str='', universe=UNIVERSE_SHARED):
     try: max_wt = max(10, min(100, float(max_wt_str))) / 100.0
     except (ValueError, TypeError): max_wt = 0.50
     try: min_wt = max(0, min(50, float(min_wt_str))) / 100.0
@@ -644,7 +659,8 @@ def _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
                                  progress_bar=progress,
                                  max_vol=max_vol, min_ann_ret=min_ann_ret,
                                  benchmarks=benchmark, min_pos=min_pos, round_step=round_step,
-                                 min_history_days=min_hist_days, max_pos=max_pos)
+                                 min_history_days=min_hist_days, max_pos=max_pos,
+                                 universe=universe)
     progress.empty()
 
     if not grid or not grid['results']:
@@ -667,7 +683,7 @@ def _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
         'direction': 'L/S' if allow_short else 'Long',
         'min_wt': min_wt, 'max_wt': max_wt, 'n_sims': n_sims, 'txn_cost': txn_cost,
         'max_vol': max_vol, 'min_ann_ret': min_ann_ret, 'min_pos': min_pos, 'round_step': round_step,
-        'min_hist_days': min_hist_days, 'max_pos': max_pos,
+        'min_hist_days': min_hist_days, 'max_pos': max_pos, 'universe': universe,
         'listings': st.session_state.get('port_listings', LISTINGS[0]),
         'preset_name': preset_name,
     }
@@ -686,6 +702,7 @@ def _display_mc(is_mobile, _lbl):
     constraints_str = ''
     if params.get('max_vol'): constraints_str += f" · max vol {params['max_vol']*100:.0f}%"
     if params.get('min_ann_ret'): constraints_str += f" · min ret {params['min_ann_ret']*100:.0f}%"
+    if params.get('universe'): constraints_str += f" · {params['universe'].lower()}"
     if params.get('listings') and params['listings'] != LISTINGS[0]:
         constraints_str += f" · {params['listings'].lower()}"
     if params.get('max_pos'): constraints_str += f" · top {params['max_pos']} names"
@@ -751,7 +768,7 @@ def _display_mc(is_mobile, _lbl):
 def _run_fs(symbols, score, rebal_label, rebal, period_label, fetch_days,
             direction, sims_str, max_wt_str, min_wt_str, max_vol_str, min_ret_str,
             txn_cost, benchmark=(), min_pos_str='', round_str='', min_hist_days=0,
-            max_pos_str=''):
+            max_pos_str='', universe=UNIVERSE_SHARED):
     try: max_wt = max(10, min(100, float(max_wt_str))) / 100.0
     except (ValueError, TypeError): max_wt = 0.50
     try: min_wt = max(0, min(50, float(min_wt_str))) / 100.0
@@ -805,7 +822,7 @@ def _run_fs(symbols, score, rebal_label, rebal, period_label, fetch_days,
         'direction': 'L/S' if allow_short else 'Long',
         'min_wt': min_wt, 'max_wt': max_wt, 'n_sims': n_sims, 'txn_cost': txn_cost,
         'max_vol': max_vol, 'min_ann_ret': min_ann_ret, 'min_pos': min_pos, 'round_step': round_step,
-        'min_hist_days': min_hist_days, 'max_pos': max_pos,
+        'min_hist_days': min_hist_days, 'max_pos': max_pos, 'universe': universe,
         'listings': st.session_state.get('port_listings', LISTINGS[0]),
         'preset_name': preset_name,
     }
@@ -824,6 +841,7 @@ def _display_fs(is_mobile, _lbl):
     constraints_str = ''
     if params.get('max_vol'): constraints_str += f" · max vol {params['max_vol']*100:.0f}%"
     if params.get('min_ann_ret'): constraints_str += f" · min ret {params['min_ann_ret']*100:.0f}%"
+    if params.get('universe'): constraints_str += f" · {params['universe'].lower()}"
     if params.get('listings') and params['listings'] != LISTINGS[0]:
         constraints_str += f" · {params['listings'].lower()}"
     if params.get('max_pos'): constraints_str += f" · top {params['max_pos']} names"

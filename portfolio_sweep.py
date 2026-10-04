@@ -20,7 +20,7 @@ import streamlit as st
 from config import THEMES, FONTS, filter_listings
 from portfolio import (OBJECTIVES, REBAL_OPTIONS, PERIOD_OPTIONS, SCORE_TO_RANK,
                        LOWER_IS_BETTER, composite_ranks, rank_rows,
-                       sweep_configs, _section, C_MUTE)
+                       sweep_configs, UNIVERSES, _section, C_MUTE)
 from portfolio_single import LISTINGS, _pool, _resolve_min_hist
 from spreads import basket_picker
 
@@ -135,7 +135,8 @@ def render_sweep_tab(is_mobile):
     symbols = filter_listings(pooled, listings)
 
     _defaults = {'sweep_sims': '2000', 'sweep_maxwt': '50', 'sweep_minwt': '0',
-                 'sweep_cost': '0.10', 'sweep_maxpos': '', 'sweep_minhist': 'auto'}
+                 'sweep_cost': '0.10', 'sweep_maxpos': '', 'sweep_minhist': 'auto',
+                 'sweep_minpos': '', 'sweep_round': ''}
     for k, v in _defaults.items():
         st.session_state.setdefault(k, v)
 
@@ -153,6 +154,11 @@ def render_sweep_tab(is_mobile):
                                          'sees the same history, so this is the one setting that '
                                          'is not being searched over.')
     with b1:
+        universe = st.selectbox('Universe', UNIVERSES, key='sweep_universe',
+                                help='As listed keeps a symbol out until it has enough history to '
+                                     'be scored, then adds it at the next rebalance, so no single '
+                                     'late listing governs the window. Shared window demands a '
+                                     'price from every symbol on every day.')
         direction = st.selectbox('Direction', ['Long Only', 'Long/Short'], key='sweep_direction')
     with b2:
         rank_by = st.selectbox('Rank by', ['Composite'] + OBJECTIVES[1:], key='sweep_rank',
@@ -186,7 +192,19 @@ def render_sweep_tab(is_mobile):
         with c5:
             min_hist_str = st.text_input('Min Hist Y', key='sweep_minhist',
                                          placeholder='auto, or e.g. 2')
-        cost_str = st.text_input('Cost %', key='sweep_cost')
+        d1, d2, d3 = st.columns(3)
+        with d1:
+            min_pos_str = st.text_input('Min Pos % (drop below)', key='sweep_minpos',
+                                        placeholder='e.g. 1')
+        with d2:
+            round_str = st.text_input('Round % (step)', key='sweep_round', placeholder='e.g. 1')
+        with d3:
+            cost_str = st.text_input('Cost %', key='sweep_cost',
+                                     help='Charged on turnover at every rebalance, exactly as on '
+                                          'the Single tab. It is the reason a weekly rebalance has '
+                                          'to earn its frequency rather than just being given it, '
+                                          'so a sweep run at zero cost will tell you to trade more '
+                                          'often than you should.')
 
     n_runs = len(sweep_objs) * len(sweep_rebals)
     busy = (' — a few minutes; drop some objectives to shorten it'
@@ -215,6 +233,10 @@ def render_sweep_tab(is_mobile):
         except (ValueError, TypeError): n_sims = 2000
         try: max_pos = max(2, int(float(max_pos_str))) if max_pos_str.strip() else 0
         except (ValueError, TypeError): max_pos = 0
+        try: min_pos = max(0, min(50, float(min_pos_str))) / 100.0 if min_pos_str.strip() else 0.0
+        except (ValueError, TypeError): min_pos = 0.0
+        try: round_step = max(0.1, min(25, float(round_str))) / 100.0 if round_str.strip() else 0.0
+        except (ValueError, TypeError): round_step = 0.0
         min_hist_days, auto_pick = _resolve_min_hist(symbols, period_days, min_hist_str)
         if auto_pick is not None:
             dropped, kept, total, days, cutoff = auto_pick
@@ -224,8 +246,9 @@ def render_sweep_tab(is_mobile):
 
         progress = st.progress(0, text='Sweeping...')
         rows = sweep_configs(symbols, sweep_objs, sweep_rebals, period_days, n_sims,
-                          max_wt, min_wt, txn_cost, direction == 'Long/Short',
-                          max_pos, min_hist_days, progress)
+                             max_wt, min_wt, txn_cost, direction == 'Long/Short',
+                             max_pos, min_hist_days, progress, universe=universe,
+                             min_pos=min_pos, round_step=round_step)
         if not rows:
             st.warning('No configuration produced a usable walk-forward. Try a longer Period, '
                        'or set Min Hist Y to auto.')

@@ -98,6 +98,17 @@ SCORE_TO_RANK = {
 # arbitrary tie-breaking or double-counted straightness.
 COMPOSITE_METRICS = ('sharpe', 'sortino', 'roa', 'er')
 
+# How the universe is assembled over time.
+#   Shared window -- every symbol must have a price on every day of the test, so
+#     one 2024 listing drags three hundred names down to its own listing date.
+#   As listed     -- a symbol is absent until it has enough history to be scored,
+#     then joins at the next rebalance. Nothing is discarded for being late and
+#     nothing governs the window, which is what you actually want from a basket
+#     that keeps gaining members.
+UNIVERSE_SHARED = 'Shared window'
+UNIVERSE_ASLISTED = 'As listed'
+UNIVERSES = [UNIVERSE_ASLISTED, UNIVERSE_SHARED]
+
 # Metrics a smaller number wins on. Composite scores a mean RANK, so 1.0 is the
 # best possible and sorting it the usual way would put the worst row on top.
 LOWER_IS_BETTER = {'_score', 'ann_vol', 'max_dd', 'avg_dd'}
@@ -171,7 +182,7 @@ def fetch_notes(symbols, days, min_history_days=0):
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def fetch_symbol_history(symbols_tuple, days=1800, min_history_days=0):
+def fetch_symbol_history(symbols_tuple, days=1800, min_history_days=0, align='common'):
     symbols = list(symbols_tuple)
     if not symbols: return None, []
     note = {'n_requested': len(symbols), 'no_data': [], 'n_ok': 0,
@@ -225,6 +236,13 @@ def fetch_symbol_history(symbols_tuple, days=1800, min_history_days=0):
     if len(common):
         note['start'] = common.index[0]; note['end'] = common.index[-1]
         note['limiters'] = sorted(firsts, key=lambda kv: kv[1], reverse=True)[:3]
+    if align == 'union':
+        # Every bar any symbol printed, forward-filled, NaN before a symbol's
+        # first print. Nothing is thrown away for being late: a 2024 listing is
+        # simply absent until 2024 and joins the book at the first rebalance that
+        # can score it. This is the frame the As-listed universe walks over.
+        if len(data) < 50: return None, valid
+        return data, valid
     if len(common) < 50: return None, valid
     return common, valid
 
@@ -663,25 +681,52 @@ def _round_weights(w, step):
 def _optimize_at_rebalance(returns_df, approach, score_type, n_portfolios, mw, mnw=0.0, allow_short=False,
                            max_vol=None, min_ann_ret=None, window_cache=None, min_pos=0.0, round_step=0.0,
                            max_pos=0):
+    """Blended weights at one rebalance, over whatever is tradeable by then.
+
+    RETURNS_DF may carry NaN before a symbol's first print. Each window keeps the
+    symbols that have at least WDAYS observations, which is exactly the set whose
+    last WDAYS rows are dense -- the gaps are all at the top. A symbol old enough
+    for the 3mo window but not the 12mo one therefore earns weight from the 3mo
+    leg only, which is the honest answer rather than either excluding it outright
+    or pretending it has a year of history.
+    """
     n_assets = returns_df.shape[1]; data_len = len(returns_df)
+    counts = returns_df.notna().sum().values
     window_weights_list = []; blend_wts = []
     for wname, wdays in approach['windows'].items():
-        if data_len >= wdays:
-            cache_key = (wname, data_len) if window_cache is not None else None
-            if cache_key and cache_key in window_cache:
-                best_w = window_cache[cache_key]
-            else:
-                w_ret = returns_df.iloc[-wdays:]
-                best_w = _optimize_window_vectorized(w_ret.values, n_portfolios, n_assets, mw, score_type, mnw, allow_short,
-                                                      max_vol=max_vol, min_ann_ret=min_ann_ret)
-                if cache_key and window_cache is not None:
-                    window_cache[cache_key] = best_w
-            window_weights_list.append(best_w); blend_wts.append(approach['blend'][wname])
+        if data_len < wdays:
+            continue
+        live = np.flatnonzero(counts >= wdays)
+        if len(live) < 2:
+            continue
+        cache_key = (wname, data_len) if window_cache is not None else None
+        if cache_key and cache_key in window_cache:
+            best_w = window_cache[cache_key]
+        else:
+            w_ret = returns_df.iloc[-wdays:, live].values
+            if not np.isfinite(w_ret).all():
+                # A hole in the middle rather than at the top -- a trading halt,
+                # or a symbol that stopped printing. Those columns cannot be
+                # scored on this window.
+                ok = np.isfinite(w_ret).all(axis=0)
+                if ok.sum() < 2:
+                    continue
+                live = live[ok]; w_ret = w_ret[:, ok]
+            sub_w = _optimize_window_vectorized(w_ret, n_portfolios, len(live), mw, score_type,
+                                                mnw, allow_short, max_vol=max_vol,
+                                                min_ann_ret=min_ann_ret)
+            best_w = np.zeros(n_assets)
+            best_w[live] = sub_w
+            if cache_key and window_cache is not None:
+                window_cache[cache_key] = best_w
+        window_weights_list.append(best_w); blend_wts.append(approach['blend'][wname])
     if not window_weights_list: return None
     blend_wts = np.array(blend_wts); blend_wts /= blend_wts.sum()
     all_w = np.array(window_weights_list)
     opt_w = np.average(all_w, axis=0, weights=blend_wts)
-    opt_w /= opt_w.sum()
+    total = opt_w.sum()
+    if total == 0: return None
+    opt_w /= total
     # Dust first, then the count cap, then the rounding step: Min Pos drops the
     # slivers that would otherwise occupy slots in the top N, and rounding has to
     # come last or it cannot guarantee the weights still add to 100%.
@@ -695,7 +740,11 @@ def _walk_forward_single(returns_df, approach, score_type, rebal_months,
                          max_vol=None, min_ann_ret=None, window_cache=None, min_pos=0.0, round_step=0.0,
                          max_pos=0):
     n_assets = returns_df.shape[1]; mw = max_weight; mnw = min_weight
-    min_is_days = max(approach['windows'].values()); dates = returns_df.index
+    # The SHORTEST window decides when trading can start. On a shared window
+    # every symbol is present from bar zero so this is the same as the longest;
+    # on a growing one it is what lets the test begin before the whole universe
+    # has a year of history behind it.
+    min_is_days = min(approach['windows'].values()); dates = returns_df.index
 
     if rebal_months == -1:
         candidate_dates = [dates[min_is_days]] if len(dates) > min_is_days else []
@@ -737,7 +786,10 @@ def _walk_forward_single(returns_df, approach, score_type, rebal_months,
         oos_end = rebal_dates[i + 1][0] if i + 1 < len(rebal_dates) else len(dates)
         if oos_start >= oos_end: continue
         oos_data = returns_df.iloc[oos_start:oos_end]
-        port_oos = oos_data.values @ opt_w
+        # Only the names the optimiser could actually score carry weight, so the
+        # NaNs belonging to symbols not yet listed never reach the dot product.
+        held = np.flatnonzero(np.abs(opt_w) > 0)
+        port_oos = np.nan_to_num(oos_data.values[:, held], nan=0.0) @ opt_w[held]
         turnover = np.sum(np.abs(opt_w - prev_weights)) / 2.0
         if txn_cost > 0 and turnover > 0: port_oos[0] -= turnover * txn_cost
         prev_weights = opt_w.copy()
@@ -812,10 +864,16 @@ def run_walkforward_grid(symbols, score_type='Win Rate', rebal_months=3, n_portf
                          fetch_days=1800, max_weight=0.50, min_weight=0.0,
                          txn_cost=0.001, allow_short=False, progress_bar=None,
                          max_vol=None, min_ann_ret=None, benchmarks=None, min_pos=0.0, round_step=0.0,
-                         min_history_days=0, max_pos=0):
-    data, valid = fetch_symbol_history(tuple(symbols), days=fetch_days, min_history_days=min_history_days)
+                         min_history_days=0, max_pos=0, universe='common'):
+    data, valid = fetch_symbol_history(tuple(symbols), days=fetch_days,
+                                       min_history_days=min_history_days,
+                                       align='union' if universe == UNIVERSE_ASLISTED else 'common')
     if data is None or len(valid) < 2: return None
-    returns = data.pct_change().dropna(); n_assets = len(valid)
+    # dropna() on the union frame would undo the whole point of fetching it, so
+    # only the first row -- the one pct_change cannot produce -- is dropped.
+    returns = data.pct_change()
+    returns = returns.iloc[1:] if universe == UNIVERSE_ASLISTED else returns.dropna()
+    n_assets = len(valid)
 
     # Equal weight benchmark with drift + transaction costs
     eq_w = np.ones(n_assets) / n_assets
@@ -837,10 +895,26 @@ def run_walkforward_grid(symbols, score_type='Win Rate', rebal_months=3, n_portf
             ym = (d.year, d.month)
             if ym not in seen and d.month in rebal_month_set: seen.add(ym); eq_rebal_set.add(d)
     ret_arr = returns.values; n_days = len(ret_arr); eq_daily = np.zeros(n_days)
+    live_arr = np.isfinite(ret_arr)
     curr_w = eq_w.copy()
     for t in range(n_days):
-        eq_daily[t] = curr_w @ ret_arr[t]
-        grown = curr_w * (1 + ret_arr[t]); g_sum = grown.sum()
+        row = ret_arr[t]
+        if universe == UNIVERSE_ASLISTED:
+            # 1/N over whatever is listed on the day, so the benchmark the
+            # strategy is measured against grows the same way the strategy does.
+            # It re-equalises at each rebalance rather than drifting across a
+            # changing membership, which has no well-defined drift.
+            live = live_arr[t]
+            n_live = int(live.sum())
+            if n_live < 1:
+                continue
+            w = np.zeros(n_assets); w[live] = 1.0 / n_live
+            eq_daily[t] = float(np.nansum(w * row))
+            if t + 1 < n_days and dates[t + 1] in eq_rebal_set:
+                eq_daily[t] -= (1.0 / max(n_live, 1)) * txn_cost
+            continue
+        eq_daily[t] = curr_w @ row
+        grown = curr_w * (1 + row); g_sum = grown.sum()
         curr_w = grown / g_sum if g_sum != 0 else eq_w.copy()
         if t + 1 < n_days and dates[t + 1] in eq_rebal_set:
             turnover = np.sum(np.abs(eq_w - curr_w)) / 2.0
@@ -894,11 +968,18 @@ def run_fullsample(symbols, score_type='Win Rate', n_portfolios=10000,
                    fetch_days=1800, max_weight=0.50, min_weight=0.0,
                    txn_cost=0.001, allow_short=False, progress_bar=None,
                    max_vol=None, min_ann_ret=None, rebal_months=3, benchmarks=None, min_pos=0.0,
-                   round_step=0.0, min_history_days=0, max_pos=0):
+                   round_step=0.0, min_history_days=0, max_pos=0, universe='common'):
     """Run MC optimization on full dataset — no walk-forward split.
     Tests all PORTFOLIO_APPROACHES lookback windows that fit in the data,
     returns weights + in-sample backtest for each."""
-    data, valid = fetch_symbol_history(tuple(symbols), days=fetch_days, min_history_days=min_history_days)
+    # Always the shared window, whatever the caller asked for. Full sample fits
+    # ONE weight vector to the whole history and scores it on that same history;
+    # a symbol that did not exist for half of it cannot carry a constant weight
+    # through the half it was missing. As listed is a walk-forward idea -- the
+    # universe grows because the test moves forward in time -- and there is no
+    # honest way to express it here. The UI says so rather than offering it.
+    data, valid = fetch_symbol_history(tuple(symbols), days=fetch_days,
+                                       min_history_days=min_history_days)
     if data is None or len(valid) < 2: return None
     returns = data.pct_change().dropna(); n_assets = len(valid)
 
@@ -1004,7 +1085,8 @@ def run_fullsample(symbols, score_type='Win Rate', n_portfolios=10000,
 
 def sweep_configs(symbols, objectives, rebalances, period_days, n_sims, max_wt, min_wt,
                    txn_cost, allow_short, max_pos, min_hist_days,
-                   progress=None, engine=None):
+                   progress=None, engine=None, universe='common',
+                   min_pos=0.0, round_step=0.0):
     """One walk-forward grid per (objective, rebalance). Each call sweeps the
     eleven lookbacks itself, so the third dimension comes free with the second.
 
@@ -1024,7 +1106,8 @@ def sweep_configs(symbols, objectives, rebalances, period_days, n_sims, max_wt, 
                 fetch_days=period_days, n_portfolios=n_sims,
                 max_weight=max_wt, min_weight=min_wt, txn_cost=txn_cost,
                 allow_short=allow_short, max_pos=max_pos,
-                min_history_days=min_hist_days)
+                min_history_days=min_hist_days, universe=universe,
+                min_pos=min_pos, round_step=round_step)
             if not grid or not grid['results']:
                 continue
             # Each cell is judged by the objective it was optimised for -- that is
