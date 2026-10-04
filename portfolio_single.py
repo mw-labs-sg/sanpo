@@ -527,8 +527,11 @@ def render_single_tab(is_mobile):
         st.markdown(f"<div style='padding:20px;color:{C_MUTE};font-size:11px;font-family:{FONTS}'>Configure parameters and click to start {hint}</div>", unsafe_allow_html=True)
         return
 
-    # Parse shared params
-    rebal = REBAL_OPTIONS[rebal_label]
+    # Parse shared params. Auto is not a frequency yet -- it is resolved inside
+    # the run block below, which reassigns rebal once the search has picked one.
+    # This line runs on EVERY render, including the one right after you choose
+    # Auto, so it cannot be the place that looks the label up.
+    rebal = REBAL_OPTIONS.get(rebal_label, REBAL_OPTIONS['Monthly'])
     fetch_days = PERIOD_OPTIONS[period_label]
     try: txn_cost = max(0, min(5.0, float(cost_str))) / 100.0
     except (ValueError, TypeError): txn_cost = 0.001
@@ -656,8 +659,11 @@ def _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
     # that used to put a name to a typed symbol list has nothing left to guess at.
     preset_name = st.session_state.get('port_preset_name') or 'Portfolio'
     st.session_state.port_params = {
-        'score': score, 'rebal_label': st.session_state.get('port_rebal', 'Quarterly'),
-        'period_label': st.session_state.get('port_period', '5 Years'),
+        # The RESOLVED labels, not the session keys: those still read "Auto" after
+        # a search, and the summary line would then name the question instead of
+        # the answer.
+        'score': score, 'rebal_label': rebal_label,
+        'period_label': period_label,
         'direction': 'L/S' if allow_short else 'Long',
         'min_wt': min_wt, 'max_wt': max_wt, 'n_sims': n_sims, 'txn_cost': txn_cost,
         'max_vol': max_vol, 'min_ann_ret': min_ann_ret, 'min_pos': min_pos, 'round_step': round_step,
@@ -791,8 +797,11 @@ def _run_fs(symbols, score, rebal_label, rebal, period_label, fetch_days,
     # that used to put a name to a typed symbol list has nothing left to guess at.
     preset_name = st.session_state.get('port_preset_name') or 'Portfolio'
     st.session_state.port_fs_params = {
-        'score': score, 'rebal_label': st.session_state.get('port_rebal', 'Quarterly'),
-        'period_label': st.session_state.get('port_period', '5 Years'),
+        # The RESOLVED labels, not the session keys: those still read "Auto" after
+        # a search, and the summary line would then name the question instead of
+        # the answer.
+        'score': score, 'rebal_label': rebal_label,
+        'period_label': period_label,
         'direction': 'L/S' if allow_short else 'Long',
         'min_wt': min_wt, 'max_wt': max_wt, 'n_sims': n_sims, 'txn_cost': txn_cost,
         'max_vol': max_vol, 'min_ann_ret': min_ann_ret, 'min_pos': min_pos, 'round_step': round_step,
