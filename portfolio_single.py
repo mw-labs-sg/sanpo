@@ -10,7 +10,8 @@ from portfolio import (C_MUTE, C_BG, C_TXT, C_TXT2, C_GOLD, BENCH_COLORS, MAX_BE
                        REBAL_OPTIONS, PERIOD_OPTIONS, SCORE_TO_RANK, OBJECTIVES,
                        fetch_symbol_history, fetch_notes, min_hist_frontier, min_hist_auto,
                        min_hist_days_for, sweep_configs, composite_ranks, rank_rows,
-                       UNIVERSES, UNIVERSE_SHARED,
+                       UNIVERSES, UNIVERSE_SHARED, WEIGHTINGS, WEIGHTING_OPTIMIZED,
+                       WEIGHTING_EQUAL,
                        benchmark_series, _bench_metrics, _calc_oos_metrics,
                        run_walkforward_grid, run_fullsample,
                        render_ranking_table,
@@ -459,7 +460,18 @@ def render_single_tab(is_mobile):
 
     # ---------------------------------------------------------------- how to execute
     _group('HOW TO EXECUTE', 'shape the weights into something you can actually trade')
-    c0, c1, c2, c3, c4 = st.columns(5)
+    c0, cw, c1, c2, c3, c4 = st.columns(6)
+    with cw:
+        weighting = st.selectbox('Weighting', WEIGHTINGS, key='port_weighting', disabled=_dis,
+                                 help='How the picks get sized. Optimized uses the weights the '
+                                      'search produced. Equal weight uses the search only to '
+                                      'SELECT, then gives every holding 1/N and re-equalises at '
+                                      'each rebalance — optimised weights are the noisiest '
+                                      'thing an optimiser produces, while the selection is usually '
+                                      'the part carrying signal. With Max Pos this reads as "hold '
+                                      'the best 20 names, equally". Note this is not the Equal '
+                                      'Weight Mode, which skips the search entirely and holds the '
+                                      'whole universe.')
     with c0:
         max_pos_str = st.text_input('Max Pos (how many names)', key='port_maxpos', placeholder='e.g. 20',
                                     disabled=_dis,
@@ -604,7 +616,7 @@ def render_single_tab(is_mobile):
             _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
                     direction, sims_str, max_wt_str, min_wt_str, max_vol_str, min_ret_str,
                     txn_cost, bench, min_pos_str, round_str, min_hist_days, max_pos_str,
-                    universe)
+                    universe, weighting)
         elif is_fs:
             _run_fs(symbols, score, rebal_label, rebal, period_label, fetch_days,
                     direction, sims_str, max_wt_str, min_wt_str, max_vol_str, min_ret_str,
@@ -628,7 +640,7 @@ def render_single_tab(is_mobile):
 def _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
             direction, sims_str, max_wt_str, min_wt_str, max_vol_str, min_ret_str,
             txn_cost, benchmark=(), min_pos_str='', round_str='', min_hist_days=0,
-            max_pos_str='', universe=UNIVERSE_SHARED):
+            max_pos_str='', universe=UNIVERSE_SHARED, weighting=WEIGHTING_OPTIMIZED):
     try: max_wt = max(10, min(100, float(max_wt_str))) / 100.0
     except (ValueError, TypeError): max_wt = 0.50
     try: min_wt = max(0, min(50, float(min_wt_str))) / 100.0
@@ -660,7 +672,7 @@ def _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
                                  max_vol=max_vol, min_ann_ret=min_ann_ret,
                                  benchmarks=benchmark, min_pos=min_pos, round_step=round_step,
                                  min_history_days=min_hist_days, max_pos=max_pos,
-                                 universe=universe)
+                                 universe=universe, weighting=weighting)
     progress.empty()
 
     if not grid or not grid['results']:
@@ -684,6 +696,7 @@ def _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
         'min_wt': min_wt, 'max_wt': max_wt, 'n_sims': n_sims, 'txn_cost': txn_cost,
         'max_vol': max_vol, 'min_ann_ret': min_ann_ret, 'min_pos': min_pos, 'round_step': round_step,
         'min_hist_days': min_hist_days, 'max_pos': max_pos, 'universe': universe,
+        'weighting': weighting,
         'listings': st.session_state.get('port_listings', LISTINGS[0]),
         'preset_name': preset_name,
     }
@@ -703,6 +716,7 @@ def _display_mc(is_mobile, _lbl):
     if params.get('max_vol'): constraints_str += f" · max vol {params['max_vol']*100:.0f}%"
     if params.get('min_ann_ret'): constraints_str += f" · min ret {params['min_ann_ret']*100:.0f}%"
     if params.get('universe'): constraints_str += f" · {params['universe'].lower()}"
+    if params.get('weighting') == WEIGHTING_EQUAL: constraints_str += ' · equal weighted'
     if params.get('listings') and params['listings'] != LISTINGS[0]:
         constraints_str += f" · {params['listings'].lower()}"
     if params.get('max_pos'): constraints_str += f" · top {params['max_pos']} names"
@@ -768,7 +782,7 @@ def _display_mc(is_mobile, _lbl):
 def _run_fs(symbols, score, rebal_label, rebal, period_label, fetch_days,
             direction, sims_str, max_wt_str, min_wt_str, max_vol_str, min_ret_str,
             txn_cost, benchmark=(), min_pos_str='', round_str='', min_hist_days=0,
-            max_pos_str='', universe=UNIVERSE_SHARED):
+            max_pos_str='', universe=UNIVERSE_SHARED, weighting=WEIGHTING_OPTIMIZED):
     try: max_wt = max(10, min(100, float(max_wt_str))) / 100.0
     except (ValueError, TypeError): max_wt = 0.50
     try: min_wt = max(0, min(50, float(min_wt_str))) / 100.0
@@ -823,6 +837,7 @@ def _run_fs(symbols, score, rebal_label, rebal, period_label, fetch_days,
         'min_wt': min_wt, 'max_wt': max_wt, 'n_sims': n_sims, 'txn_cost': txn_cost,
         'max_vol': max_vol, 'min_ann_ret': min_ann_ret, 'min_pos': min_pos, 'round_step': round_step,
         'min_hist_days': min_hist_days, 'max_pos': max_pos, 'universe': universe,
+        'weighting': weighting,
         'listings': st.session_state.get('port_listings', LISTINGS[0]),
         'preset_name': preset_name,
     }
@@ -842,6 +857,7 @@ def _display_fs(is_mobile, _lbl):
     if params.get('max_vol'): constraints_str += f" · max vol {params['max_vol']*100:.0f}%"
     if params.get('min_ann_ret'): constraints_str += f" · min ret {params['min_ann_ret']*100:.0f}%"
     if params.get('universe'): constraints_str += f" · {params['universe'].lower()}"
+    if params.get('weighting') == WEIGHTING_EQUAL: constraints_str += ' · equal weighted'
     if params.get('listings') and params['listings'] != LISTINGS[0]:
         constraints_str += f" · {params['listings'].lower()}"
     if params.get('max_pos'): constraints_str += f" · top {params['max_pos']} names"

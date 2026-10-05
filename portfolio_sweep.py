@@ -20,7 +20,7 @@ import streamlit as st
 from config import THEMES, FONTS, filter_listings
 from portfolio import (OBJECTIVES, REBAL_OPTIONS, PERIOD_OPTIONS, SCORE_TO_RANK,
                        LOWER_IS_BETTER, composite_ranks, rank_rows,
-                       sweep_configs, UNIVERSES, _section, C_MUTE)
+                       sweep_configs, UNIVERSES, WEIGHTINGS, _section, C_MUTE)
 from portfolio_single import LISTINGS, _pool, _resolve_min_hist
 from spreads import basket_picker
 
@@ -160,6 +160,10 @@ def render_sweep_tab(is_mobile):
                                      'late listing governs the window. Shared window demands a '
                                      'price from every symbol on every day.')
         direction = st.selectbox('Direction', ['Long Only', 'Long/Short'], key='sweep_direction')
+        weighting = st.selectbox('Weighting', WEIGHTINGS, key='sweep_weighting',
+                                 help='Optimized sizes the picks the way the search did. Equal '
+                                      'weight uses the search only to select and then holds 1/N, '
+                                      're-equalised at each rebalance.')
     with b2:
         rank_by = st.selectbox('Rank by', ['Composite'] + OBJECTIVES[1:], key='sweep_rank',
                                help='What orders the table and colours the grid. Composite is the '
@@ -248,7 +252,7 @@ def render_sweep_tab(is_mobile):
         rows = sweep_configs(symbols, sweep_objs, sweep_rebals, period_days, n_sims,
                              max_wt, min_wt, txn_cost, direction == 'Long/Short',
                              max_pos, min_hist_days, progress, universe=universe,
-                             min_pos=min_pos, round_step=round_step)
+                             min_pos=min_pos, round_step=round_step, weighting=weighting)
         if not rows:
             st.warning('No configuration produced a usable walk-forward. Try a longer Period, '
                        'or set Min Hist Y to auto.')

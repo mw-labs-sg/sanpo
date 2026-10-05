@@ -69,7 +69,25 @@ PORTFOLIO_APPROACHES = OrderedDict([
                           'blend': {'3mo': 0.40, '6mo': 0.30, '12mo': 0.20, '24mo': 0.10}, 'min_days': 504}),
     ('24mo Inv Recency', {'windows': OrderedDict([('3mo', 63), ('6mo', 126), ('12mo', 252), ('24mo', 504)]),
                           'blend': {'3mo': 0.10, '6mo': 0.20, '12mo': 0.30, '24mo': 0.40}, 'min_days': 504}),
+    # Anchored: the window does not roll, it grows. Every rebalance scores
+    # EVERYTHING from the start of the data up to that date, so the estimate
+    # keeps getting steadier instead of forgetting at a fixed rate. It is the
+    # opposite end of the scale from 1mo Recency -- the slowest thing on the
+    # board, and the one that cannot be whipsawed by a single quarter. 252 bars
+    # is the floor before it will trade at all.
+    ('Anchored',         {'windows': OrderedDict([('all', 252)]),
+                          'blend': {'all': 1.0}, 'min_days': 252, 'anchored': True}),
 ])
+
+# How the chosen weights are sized once the optimiser has picked the names.
+#   Optimized    -- the weights the search actually produced.
+#   Equal weight -- the search is used only to SELECT, then every holding gets
+#     1/N. Optimised weights are the noisiest thing an optimiser produces; the
+#     selection is usually the part that carries signal. Pair it with Max Pos
+#     and this reads as "hold the best 20 names, equally".
+WEIGHTING_OPTIMIZED = 'Optimized'
+WEIGHTING_EQUAL = 'Equal weight'
+WEIGHTINGS = [WEIGHTING_OPTIMIZED, WEIGHTING_EQUAL]
 
 REBAL_OPTIONS = OrderedDict([
     ('No Rebalance', -1), ('Weekly', 0), ('Monthly', 1), ('Quarterly', 3), ('Semi-Annual', 6), ('Annual', 12),
@@ -657,6 +675,23 @@ def _apply_max_pos(w, max_pos, max_weight=None):
     return out
 
 
+def _equalize(w):
+    """Flatten the held names to 1/N, keeping the selection and discarding the
+    sizing. Signs are preserved so a Long/Short book stays the shape the search
+    chose; if the legs cancel so completely that the result cannot be scaled to
+    100%, the optimiser's own weights are handed back rather than a levered one.
+    """
+    held = np.flatnonzero(np.abs(w) > 0)
+    if len(held) == 0:
+        return w
+    out = np.zeros_like(w)
+    out[held] = np.sign(w[held]) / len(held)
+    total = out.sum()
+    if total <= 1e-12:
+        return w
+    return out / total
+
+
 def _round_weights(w, step):
     """Snap weights to a step (0.01 = whole percents) using largest-remainder, so
     the rounded weights still add to exactly 100% instead of 99.9 or 100.1.
@@ -680,7 +715,7 @@ def _round_weights(w, step):
 
 def _optimize_at_rebalance(returns_df, approach, score_type, n_portfolios, mw, mnw=0.0, allow_short=False,
                            max_vol=None, min_ann_ret=None, window_cache=None, min_pos=0.0, round_step=0.0,
-                           max_pos=0):
+                           max_pos=0, weighting=WEIGHTING_OPTIMIZED):
     """Blended weights at one rebalance, over whatever is tradeable by then.
 
     RETURNS_DF may carry NaN before a symbol's first print. Each window keeps the
@@ -692,6 +727,7 @@ def _optimize_at_rebalance(returns_df, approach, score_type, n_portfolios, mw, m
     """
     n_assets = returns_df.shape[1]; data_len = len(returns_df)
     counts = returns_df.notna().sum().values
+    anchored = bool(approach.get('anchored'))
     window_weights_list = []; blend_wts = []
     for wname, wdays in approach['windows'].items():
         if data_len < wdays:
@@ -703,7 +739,13 @@ def _optimize_at_rebalance(returns_df, approach, score_type, n_portfolios, mw, m
         if cache_key and cache_key in window_cache:
             best_w = window_cache[cache_key]
         else:
-            w_ret = returns_df.iloc[-wdays:, live].values
+            # Anchored takes everything up to here; the rest take the last WDAYS.
+            # Either way the slice is dense for the columns selected above, since
+            # an eligible column's gaps are all at the top -- except on anchored,
+            # where a late listing is NaN at the start of the full history and is
+            # caught by the finite check below.
+            w_ret = (returns_df.iloc[:, live].values if anchored
+                     else returns_df.iloc[-wdays:, live].values)
             if not np.isfinite(w_ret).all():
                 # A hole in the middle rather than at the top -- a trading halt,
                 # or a symbol that stopped printing. Those columns cannot be
@@ -731,6 +773,10 @@ def _optimize_at_rebalance(returns_df, approach, score_type, n_portfolios, mw, m
     # slivers that would otherwise occupy slots in the top N, and rounding has to
     # come last or it cannot guarantee the weights still add to 100%.
     opt_w = _apply_max_pos(_apply_min_pos(opt_w, min_pos, mw), max_pos, mw)
+    # Equal weight LAST of the three, so it flattens exactly the names that
+    # survived the dust cut and the count cap -- the book, not the candidates.
+    if weighting == WEIGHTING_EQUAL:
+        opt_w = _equalize(opt_w)
     return _round_weights(opt_w, round_step)
 
 
@@ -738,7 +784,7 @@ def _walk_forward_single(returns_df, approach, score_type, rebal_months,
                          n_portfolios=10000, max_weight=0.50, min_weight=0.0,
                          txn_cost=0.001, allow_short=False,
                          max_vol=None, min_ann_ret=None, window_cache=None, min_pos=0.0, round_step=0.0,
-                         max_pos=0):
+                         max_pos=0, weighting=WEIGHTING_OPTIMIZED):
     n_assets = returns_df.shape[1]; mw = max_weight; mnw = min_weight
     # The SHORTEST window decides when trading can start. On a shared window
     # every symbol is present from bar zero so this is the same as the longest;
@@ -780,7 +826,8 @@ def _walk_forward_single(returns_df, approach, score_type, rebal_months,
         is_data = returns_df.iloc[:ri + 1]
         opt_w = _optimize_at_rebalance(is_data, approach, score_type, n_portfolios, mw, mnw, allow_short,
                                         max_vol=max_vol, min_ann_ret=min_ann_ret, window_cache=window_cache,
-                                        min_pos=min_pos, round_step=round_step, max_pos=max_pos)
+                                        min_pos=min_pos, round_step=round_step, max_pos=max_pos,
+                                        weighting=weighting)
         if opt_w is None: continue
         oos_start = ri + 1
         oos_end = rebal_dates[i + 1][0] if i + 1 < len(rebal_dates) else len(dates)
@@ -801,7 +848,8 @@ def _walk_forward_single(returns_df, approach, score_type, rebal_months,
     if not oos_segments or len(weight_history) < 2: return None
     current_w = _optimize_at_rebalance(returns_df, approach, score_type, n_portfolios, mw, mnw, allow_short,
                                         max_vol=max_vol, min_ann_ret=min_ann_ret, window_cache=window_cache,
-                                        min_pos=min_pos, round_step=round_step, max_pos=max_pos)
+                                        min_pos=min_pos, round_step=round_step, max_pos=max_pos,
+                                        weighting=weighting)
     if current_w is None: current_w = weight_history[-1]['weights']
     full_oos = pd.concat(oos_segments)
     return {'oos_returns': full_oos, 'weight_history': weight_history,
@@ -864,7 +912,8 @@ def run_walkforward_grid(symbols, score_type='Win Rate', rebal_months=3, n_portf
                          fetch_days=1800, max_weight=0.50, min_weight=0.0,
                          txn_cost=0.001, allow_short=False, progress_bar=None,
                          max_vol=None, min_ann_ret=None, benchmarks=None, min_pos=0.0, round_step=0.0,
-                         min_history_days=0, max_pos=0, universe='common'):
+                         min_history_days=0, max_pos=0, universe='common',
+                         weighting=WEIGHTING_OPTIMIZED):
     data, valid = fetch_symbol_history(tuple(symbols), days=fetch_days,
                                        min_history_days=min_history_days,
                                        align='union' if universe == UNIVERSE_ASLISTED else 'common')
@@ -932,7 +981,7 @@ def run_walkforward_grid(symbols, score_type='Win Rate', rebal_months=3, n_portf
                                       n_portfolios, max_weight, min_weight, txn_cost, allow_short,
                                       max_vol=max_vol, min_ann_ret=min_ann_ret,
                                       window_cache=window_cache, min_pos=min_pos, round_step=round_step,
-                                      max_pos=max_pos)
+                                      max_pos=max_pos, weighting=weighting)
             if wf is not None:
                 metrics = _calc_oos_metrics(wf['oos_returns'])
                 if metrics is not None:
@@ -968,7 +1017,8 @@ def run_fullsample(symbols, score_type='Win Rate', n_portfolios=10000,
                    fetch_days=1800, max_weight=0.50, min_weight=0.0,
                    txn_cost=0.001, allow_short=False, progress_bar=None,
                    max_vol=None, min_ann_ret=None, rebal_months=3, benchmarks=None, min_pos=0.0,
-                   round_step=0.0, min_history_days=0, max_pos=0, universe='common'):
+                   round_step=0.0, min_history_days=0, max_pos=0, universe='common',
+                   weighting=WEIGHTING_OPTIMIZED):
     """Run MC optimization on full dataset — no walk-forward split.
     Tests all PORTFOLIO_APPROACHES lookback windows that fit in the data,
     returns weights + in-sample backtest for each."""
@@ -1036,7 +1086,8 @@ def run_fullsample(symbols, score_type='Win Rate', n_portfolios=10000,
                                            max_weight, min_weight, allow_short,
                                            max_vol=max_vol, min_ann_ret=min_ann_ret,
                                            window_cache=window_cache, min_pos=min_pos,
-                                           round_step=round_step, max_pos=max_pos)
+                                           round_step=round_step, max_pos=max_pos,
+                                           weighting=weighting)
             if opt_w is None:
                 continue
 
@@ -1086,7 +1137,7 @@ def run_fullsample(symbols, score_type='Win Rate', n_portfolios=10000,
 def sweep_configs(symbols, objectives, rebalances, period_days, n_sims, max_wt, min_wt,
                    txn_cost, allow_short, max_pos, min_hist_days,
                    progress=None, engine=None, universe='common',
-                   min_pos=0.0, round_step=0.0):
+                   min_pos=0.0, round_step=0.0, weighting=WEIGHTING_OPTIMIZED):
     """One walk-forward grid per (objective, rebalance). Each call sweeps the
     eleven lookbacks itself, so the third dimension comes free with the second.
 
@@ -1107,7 +1158,7 @@ def sweep_configs(symbols, objectives, rebalances, period_days, n_sims, max_wt, 
                 max_weight=max_wt, min_weight=min_wt, txn_cost=txn_cost,
                 allow_short=allow_short, max_pos=max_pos,
                 min_history_days=min_hist_days, universe=universe,
-                min_pos=min_pos, round_step=round_step)
+                min_pos=min_pos, round_step=round_step, weighting=weighting)
             if not grid or not grid['results']:
                 continue
             # Each cell is judged by the objective it was optimised for -- that is
