@@ -439,7 +439,9 @@ def render_single_tab(is_mobile):
                                         'because a weekly rebalance starts trading sooner than an annual one and '
                                         'banks a longer out-of-sample record on identical data.')
     with b3:
-        universe = st.selectbox('Universe', UNIVERSES, key='port_universe',
+        # Greyed out in Full Sample, which ignores it. Leaving it live showed
+        # "As listed" over a run that had quietly used the shared window.
+        universe = st.selectbox('Universe', UNIVERSES, key='port_universe', disabled=is_fs,
                                 help='How the universe is assembled over time. As listed keeps a '
                                      'symbol out until it has enough history to be scored, then '
                                      'adds it at the next rebalance — nothing is discarded '
@@ -449,6 +451,8 @@ def render_single_tab(is_mobile):
                                      'and throws away most of the history. Full Sample always '
                                      'uses Shared window, because one fixed weight vector cannot '
                                      'be carried through a period a symbol did not exist for.')
+        if is_fs:
+            st.caption('Shared window — Full Sample ignores this.')
     with b4:
         period_label = st.selectbox('Period', list(PERIOD_OPTIONS.keys()), index=3, key='port_period',
                                     help='How much price history to pull. Longer gives more to learn from and a longer '
@@ -612,6 +616,8 @@ def render_single_tab(is_mobile):
                 st.caption(f'ⓘ {note}')
                 rebal = REBAL_OPTIONS[rebal_label]
 
+        if is_fs:
+            universe = UNIVERSE_SHARED
         if is_mc:
             _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
                     direction, sims_str, max_wt_str, min_wt_str, max_vol_str, min_ret_str,
