@@ -8,7 +8,8 @@ import logging
 from config import FUTURES_GROUPS, THEMES, FONTS
 from portfolio import (REBAL_OPTIONS, PERIOD_OPTIONS, SCORE_TO_RANK, OBJECTIVES,
                        fetch_symbol_history, _calc_oos_metrics, composite_ranks,
-                       best_approach, rank_rows, run_walkforward_grid, run_fullsample,
+                       best_approach, rank_rows, MODES, MODE_WF, MODE_FS,
+                       run_walkforward_grid, run_fullsample,
                        _section)
 # Same checkbox list as SPREADS and as the Single sub-tab, so a basket means the
 # same thing on every tab that ranks one.
@@ -249,11 +250,12 @@ def render_all_tab(is_mobile):
     m1, m2 = st.columns([3, 5])
     with m1:
         st.markdown(f"<div style='{_lbl}'>MODE</div>", unsafe_allow_html=True)
-        mode = st.selectbox("Mode", ['Monte Carlo (Walk-Forward)', 'Monte Carlo (Full Sample)', 'Equal Weight'],
-                             key='portall_mode', label_visibility='collapsed')
+        if st.session_state.get('portall_mode') not in MODES:
+            st.session_state.portall_mode = MODES[0]
+        mode = st.selectbox("Mode", MODES, key='portall_mode', label_visibility='collapsed')
 
-    is_mc = mode == 'Monte Carlo (Walk-Forward)'
-    is_fs = mode == 'Monte Carlo (Full Sample)'
+    is_mc = mode == MODE_WF
+    is_fs = mode == MODE_FS
     _dis = not (is_mc or is_fs)  # disabled for EW-only fields
 
     # Row 1: Objective, Rebalance, Period, Direction, Sims

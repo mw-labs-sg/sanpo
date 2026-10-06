@@ -11,6 +11,7 @@ from portfolio import (C_MUTE, C_BG, C_TXT, C_TXT2, C_GOLD, BENCH_COLORS, MAX_BE
                        fetch_symbol_history, fetch_notes, min_hist_frontier, min_hist_auto,
                        min_hist_days_for, sweep_configs, composite_ranks, rank_rows,
                        UNIVERSES, UNIVERSE_SHARED, WEIGHTINGS, WEIGHTING_OPTIMIZED,
+                       MODES, MODE_WF, MODE_FS,
                        WEIGHTING_EQUAL,
                        benchmark_series, _bench_metrics, _calc_oos_metrics,
                        run_walkforward_grid, run_fullsample,
@@ -394,8 +395,10 @@ def render_single_tab(is_mobile):
                           'for when a basket is two thirds Tokyo and Taipei: those names also keep '
                           'their own holidays, which shortens the window everyone shares.')
     with a1:
-        mode = st.selectbox('Mode', ['Monte Carlo (Walk-Forward)', 'Monte Carlo (Full Sample)', 'Equal Weight'],
-                            key='port_mode',
+        # A mode renamed between sessions must not strand the stored value.
+        if st.session_state.get('port_mode') not in MODES:
+            st.session_state.port_mode = MODES[0]
+        mode = st.selectbox('Mode', MODES, key='port_mode',
                             help='How the weights are chosen. Walk-Forward optimises on past data only and scores the '
                                  'period that follows, which is the honest test. Full Sample optimises on all the data '
                                  'and scores the same data, which flatters. Equal Weight skips optimisation: every '
@@ -407,8 +410,8 @@ def render_single_tab(is_mobile):
                                          'the portfolio \u2014 each is drawn on the chart and added to the ranking '
                                          'table so you can see whether the portfolio beat it.')
 
-    is_mc = mode == 'Monte Carlo (Walk-Forward)'
-    is_fs = mode == 'Monte Carlo (Full Sample)'
+    is_mc = mode == MODE_WF
+    is_fs = mode == MODE_FS
     _dis = not (is_mc or is_fs)
 
     # ---------------------------------------------------------------- how to test
@@ -473,9 +476,10 @@ def render_single_tab(is_mobile):
                                       'each rebalance — optimised weights are the noisiest '
                                       'thing an optimiser produces, while the selection is usually '
                                       'the part carrying signal. With Max Pos this reads as "hold '
-                                      'the best 20 names, equally". Note this is not the Equal '
-                                      'Weight Mode, which skips the search entirely and holds the '
-                                      'whole universe.')
+                                      'the best 20 names, equally". This is the one you want for an '
+                                      'optimised equal-weight book — the Equal Weight (whole '
+                                      'universe) Mode is a different thing, holding every symbol and '
+                                      'never selecting.')
     with c0:
         max_pos_str = st.text_input('Max Pos (how many names)', key='port_maxpos', placeholder='e.g. 20',
                                     disabled=_dis,
@@ -483,7 +487,10 @@ def render_single_tab(is_mobile):
                                          'picks its weights over the whole universe, then everything outside '
                                          'the biggest N goes to 0 and the survivors are rescaled to 100%. '
                                          'Tick fourteen baskets and this is what turns 350 candidates into a '
-                                         'book you can actually place. Blank keeps every name it wanted.')
+                                         'book you can actually place. Blank keeps every name it wanted. '
+                                         'Needs a Monte Carlo Mode — Equal Weight (whole universe) has '
+                                         'no ranking to take a top N from. For the best N held equally, use '
+                                         'a Monte Carlo Mode with Weighting set to Equal weight.')
     with c1:
         min_pos_str = st.text_input('Min Pos % (drop below)', key='port_minpos', placeholder='e.g. 1', disabled=_dis,
                                     help='Dust cut. After the weights are chosen, anything under this goes to 0 and the '

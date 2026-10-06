@@ -85,6 +85,16 @@ PORTFOLIO_APPROACHES = OrderedDict([
 #     1/N. Optimised weights are the noisiest thing an optimiser produces; the
 #     selection is usually the part that carries signal. Pair it with Max Pos
 #     and this reads as "hold the best 20 names, equally".
+# The MODE picks the engine; the WEIGHTING below picks how its answer is sized.
+# The third mode used to be called "Equal Weight", which read as the same thing
+# as Weighting -> Equal weight and is not: this one skips the search entirely and
+# holds every symbol in the universe, so there is no ranking to take a Max Pos
+# from. Naming it after what it holds stops that confusion at the dropdown.
+MODE_WF = 'Monte Carlo (Walk-Forward)'
+MODE_FS = 'Monte Carlo (Full Sample)'
+MODE_EW = 'Equal Weight (whole universe)'
+MODES = [MODE_WF, MODE_FS, MODE_EW]
+
 WEIGHTING_OPTIMIZED = 'Optimized'
 WEIGHTING_EQUAL = 'Equal weight'
 WEIGHTINGS = [WEIGHTING_OPTIMIZED, WEIGHTING_EQUAL]
