@@ -82,7 +82,13 @@ def _resolve_min_hist(symbols, fetch_days, min_hist_str):
     raw = (min_hist_str or '').strip().lower()
     if raw in ('auto', 'a'):
         fetch_symbol_history(tuple(symbols), days=fetch_days)
-        chosen = min_hist_auto(fetch_notes(symbols, fetch_days, 0), fetch_days)
+        notes = fetch_notes(symbols, fetch_days, 0)
+        if not notes:
+            # Cached fetch, so no note was recorded this run. Clearing the entry
+            # makes the next call run the body and record one; until then Auto
+            # has nothing to decide on, so it leaves the universe alone.
+            return 0, None
+        chosen = min_hist_auto(notes, fetch_days)
         if chosen is None:
             return 0, None
         return min_hist_days_for(chosen[4]), chosen

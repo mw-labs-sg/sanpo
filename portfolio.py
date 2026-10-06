@@ -294,6 +294,11 @@ def min_hist_frontier(notes, fetch_days, targets=WINDOW_TARGETS):
 
     Returns [(n_dropped, n_kept, n_total, n_days, cutoff_date)], cheapest first.
     """
+    # notes can be None: _FETCH_NOTES is only written while the fetch body runs,
+    # and @st.cache_data skips the body on a hit, so a cached universe has no
+    # note to read. Nothing to say about a window we cannot see.
+    if not notes:
+        return []
     firsts = sorted((d for _s, d in (notes.get('firsts') or [])), reverse=True)
     idx = notes.get('index')
     total = len(firsts)
@@ -333,7 +338,7 @@ def min_hist_auto(notes, fetch_days, target_days=AUTO_TARGET_DAYS):
     Returns a frontier row, or None when there is nothing to gain.
     """
     rows = min_hist_frontier(notes, fetch_days)
-    if not rows:
+    if not rows or not notes:
         return None
     current = notes.get('common_rows') or 0
     usable = [r for r in rows if r[3] >= target_days]
@@ -827,7 +832,12 @@ def _walk_forward_single(returns_df, approach, score_type, rebal_months,
     for d in candidate_dates:
         idx = dates.get_loc(d)
         if idx >= min_is_days: rebal_dates.append((idx, d))
-    if len(rebal_dates) < 2: return None
+    # No Rebalance means exactly one: optimise at the end of the warm-up and hold
+    # to the end. That is a real walk-forward -- one split, trained before the
+    # period it is scored on -- and demanding two of them rejected buy-and-hold
+    # outright, which is the one strategy everything else should be beating.
+    need = 1 if rebal_months == -1 else 2
+    if len(rebal_dates) < need: return None
 
     oos_segments = []; weight_history = []
     prev_weights = np.ones(n_assets) / n_assets
@@ -855,7 +865,7 @@ def _walk_forward_single(returns_df, approach, score_type, rebal_months,
             'oos_start': dates[oos_start], 'oos_end': dates[min(oos_end - 1, len(dates) - 1)],
             'oos_days': len(oos_data)})
 
-    if not oos_segments or len(weight_history) < 2: return None
+    if not oos_segments or len(weight_history) < need: return None
     current_w = _optimize_at_rebalance(returns_df, approach, score_type, n_portfolios, mw, mnw, allow_short,
                                         max_vol=max_vol, min_ann_ret=min_ann_ret, window_cache=window_cache,
                                         min_pos=min_pos, round_step=round_step, max_pos=max_pos,
