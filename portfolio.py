@@ -92,7 +92,7 @@ PORTFOLIO_APPROACHES = OrderedDict([
 # from. Naming it after what it holds stops that confusion at the dropdown.
 MODE_WF = 'Monte Carlo (Walk-Forward)'
 MODE_FS = 'Monte Carlo (Full Sample)'
-MODE_EW = 'Equal Weight (whole universe)'
+MODE_EW = 'Equal Weight (ranked)'
 MODES = [MODE_WF, MODE_FS, MODE_EW]
 
 WEIGHTING_OPTIMIZED = 'Optimized'
@@ -417,46 +417,25 @@ def _bench_metrics(series, start=None):
 # MC OPTIMIZATION ENGINE
 # =============================================================================
 
-def _optimize_window_vectorized(returns_array, n_portfolios, n_assets, max_weight,
-                                score_type='Win Rate', min_weight=0.0, allow_short=False,
-                                max_vol=None, min_ann_ret=None):
-    if allow_short:
-        weights = np.random.randn(n_portfolios, n_assets)
-        weights = weights / weights.sum(axis=1, keepdims=True)
-        for _ in range(30):
-            violated = (weights > max_weight) | (weights < -max_weight)
-            if not np.any(violated): break
-            weights = np.clip(weights, -max_weight, max_weight)
-            weights = weights / weights.sum(axis=1, keepdims=True)
-    elif n_assets == 2:
-        lo = max(1 - max_weight, min_weight); hi = min(max_weight, 1 - min_weight)
-        if lo >= hi: lo, hi = 0.3, 0.7
-        w1 = np.random.uniform(lo, hi, n_portfolios)
-        weights = np.column_stack([w1, 1 - w1])
-    else:
-        n_half = n_portfolios // 2
-        w_conc = np.random.dirichlet(np.ones(n_assets) * 0.5, n_half)
-        w_div = np.random.dirichlet(np.ones(n_assets) * 1.0, n_portfolios - n_half)
-        weights = np.vstack([w_conc, w_div])
-        for _ in range(30):
-            violated = (weights > max_weight) | (weights < min_weight)
-            if not np.any(violated): break
-            weights = np.maximum(weights, min_weight)
-            weights = np.minimum(weights, max_weight)
-            weights = weights / weights.sum(axis=1, keepdims=True)
+def _score_rows(port_returns, score_type, max_vol=None, min_ann_ret=None):
+    """Score every ROW of a (n, bars) return matrix on SCORE_TYPE.
 
-    port_returns = weights @ returns_array.T
+    The optimiser feeds it candidate portfolios; the screen feeds it individual
+    symbols. Identical formulas either way, which is the point -- "best 20 names
+    by ROA" and "best weights by ROA" have to mean the same ROA or comparing
+    them is meaningless. Returns (scores, penalty).
+    """
+    if port_returns.ndim == 1:
+        port_returns = port_returns[None, :]
+    n_rows = port_returns.shape[0]
     ann_rets = np.mean(port_returns, axis=1) * 252
     ann_vols = np.std(port_returns, axis=1, ddof=1) * np.sqrt(252)
 
-    # Apply constraints as soft penalties — penalize violations instead of hard filter
-    penalty = np.zeros(n_portfolios)
+    penalty = np.zeros(n_rows)
     if max_vol is not None and max_vol > 0:
-        vol_excess = np.maximum(ann_vols - max_vol, 0)
-        penalty += vol_excess * 50  # strong penalty: 1% over = 0.5 penalty on 0-1 score
+        penalty += np.maximum(ann_vols - max_vol, 0) * 50
     if min_ann_ret is not None:
-        ret_shortfall = np.maximum(min_ann_ret - ann_rets, 0)
-        penalty += ret_shortfall * 50
+        penalty += np.maximum(min_ann_ret - ann_rets, 0) * 50
 
     # The row-wise twins of spreads._spread_* , one row per candidate portfolio.
     # They are the same formulas; change one and change the other.
@@ -587,6 +566,41 @@ def _optimize_window_vectorized(returns_array, n_portfolios, n_assets, max_weigh
                                                  _vec_er(port_returns))], axis=0)
     else:  # Sharpe
         scores = np.where(ann_vols > 0, ann_rets / ann_vols, 0)
+
+
+    return scores, penalty
+
+
+def _optimize_window_vectorized(returns_array, n_portfolios, n_assets, max_weight,
+                                score_type='Win Rate', min_weight=0.0, allow_short=False,
+                                max_vol=None, min_ann_ret=None):
+    if allow_short:
+        weights = np.random.randn(n_portfolios, n_assets)
+        weights = weights / weights.sum(axis=1, keepdims=True)
+        for _ in range(30):
+            violated = (weights > max_weight) | (weights < -max_weight)
+            if not np.any(violated): break
+            weights = np.clip(weights, -max_weight, max_weight)
+            weights = weights / weights.sum(axis=1, keepdims=True)
+    elif n_assets == 2:
+        lo = max(1 - max_weight, min_weight); hi = min(max_weight, 1 - min_weight)
+        if lo >= hi: lo, hi = 0.3, 0.7
+        w1 = np.random.uniform(lo, hi, n_portfolios)
+        weights = np.column_stack([w1, 1 - w1])
+    else:
+        n_half = n_portfolios // 2
+        w_conc = np.random.dirichlet(np.ones(n_assets) * 0.5, n_half)
+        w_div = np.random.dirichlet(np.ones(n_assets) * 1.0, n_portfolios - n_half)
+        weights = np.vstack([w_conc, w_div])
+        for _ in range(30):
+            violated = (weights > max_weight) | (weights < min_weight)
+            if not np.any(violated): break
+            weights = np.maximum(weights, min_weight)
+            weights = np.minimum(weights, max_weight)
+            weights = weights / weights.sum(axis=1, keepdims=True)
+
+    port_returns = weights @ returns_array.T
+    scores, penalty = _score_rows(port_returns, score_type, max_vol, min_ann_ret)
 
     # Normalize scores to 0-1 range, then apply constraint penalty
     s_min, s_max = scores.min(), scores.max()
@@ -795,11 +809,72 @@ def _optimize_at_rebalance(returns_df, approach, score_type, n_portfolios, mw, m
     return _round_weights(opt_w, round_step)
 
 
+def _screen_at_rebalance(returns_df, approach, score_type, max_pos, mw,
+                         max_vol=None, min_ann_ret=None, min_pos=0.0, round_step=0.0):
+    """Rank the symbols themselves, take the best MAX_POS, hold them 1/N.
+
+    No Monte Carlo anywhere. Where the optimiser searches thousands of weight
+    combinations and asks which PORTFOLIO scored best, this asks which SYMBOLS
+    scored best and then refuses to express an opinion about sizing. That is a
+    narrower claim and a much cheaper one -- it is also blind to how the names
+    move together, which the search is not, so it is a genuinely different
+    strategy rather than a faster approximation of the same one.
+
+    Scores are blended across the approach's windows on its own blend weights,
+    so '12mo Recency' means the same thing here as it does there: the recent
+    window counts for more. Ranking happens once, on the blend.
+    """
+    n_assets = returns_df.shape[1]; data_len = len(returns_df)
+    counts = returns_df.notna().sum().values
+    anchored = bool(approach.get('anchored'))
+    blended = np.zeros(n_assets); seen = np.zeros(n_assets)
+    for wname, wdays in approach['windows'].items():
+        if data_len < wdays:
+            continue
+        live = np.flatnonzero(counts >= wdays)
+        if len(live) < 2:
+            continue
+        w_ret = (returns_df.iloc[:, live].values if anchored
+                 else returns_df.iloc[-wdays:, live].values)
+        ok = np.isfinite(w_ret).all(axis=0)
+        if ok.sum() < 2:
+            continue
+        live = live[ok]; w_ret = w_ret[:, ok]
+        # One row per SYMBOL -- the transpose is the whole trick.
+        sc, pen = _score_rows(w_ret.T, score_type, max_vol, min_ann_ret)
+        sc = sc - pen
+        # Rank percentile, not the raw score: ROA and Sharpe live on different
+        # scales, and a blend across windows has to add comparable things.
+        rank = sc.argsort().argsort().astype(float) / max(len(sc) - 1, 1)
+        blended[live] += rank * approach['blend'][wname]
+        seen[live] += approach['blend'][wname]
+    eligible = np.flatnonzero(seen > 0)
+    if len(eligible) < 2:
+        return None
+    score = np.full(n_assets, -np.inf)
+    score[eligible] = blended[eligible] / seen[eligible]
+
+    keep = eligible[np.argsort(-score[eligible])]
+    if max_pos and max_pos > 0:
+        keep = keep[:int(max_pos)]
+    if len(keep) < 1:
+        return None
+    w = np.zeros(n_assets)
+    w[keep] = 1.0 / len(keep)
+    # Min Pos and Round still apply; they just have far less to do once every
+    # holding is already the same size.
+    w = _apply_min_pos(w, min_pos, mw)
+    capped = _cap_to_max_weight(w, mw) if mw else w
+    if capped is not None:
+        w = capped
+    return _round_weights(w, round_step)
+
+
 def _walk_forward_single(returns_df, approach, score_type, rebal_months,
                          n_portfolios=10000, max_weight=0.50, min_weight=0.0,
                          txn_cost=0.001, allow_short=False,
                          max_vol=None, min_ann_ret=None, window_cache=None, min_pos=0.0, round_step=0.0,
-                         max_pos=0, weighting=WEIGHTING_OPTIMIZED):
+                         max_pos=0, weighting=WEIGHTING_OPTIMIZED, screen=False):
     n_assets = returns_df.shape[1]; mw = max_weight; mnw = min_weight
     # The SHORTEST window decides when trading can start. On a shared window
     # every symbol is present from bar zero so this is the same as the longest;
@@ -844,7 +919,12 @@ def _walk_forward_single(returns_df, approach, score_type, rebal_months,
 
     for i, (ri, rd) in enumerate(rebal_dates):
         is_data = returns_df.iloc[:ri + 1]
-        opt_w = _optimize_at_rebalance(is_data, approach, score_type, n_portfolios, mw, mnw, allow_short,
+        if screen:
+            opt_w = _screen_at_rebalance(is_data, approach, score_type, max_pos, mw,
+                                         max_vol=max_vol, min_ann_ret=min_ann_ret,
+                                         min_pos=min_pos, round_step=round_step)
+        else:
+            opt_w = _optimize_at_rebalance(is_data, approach, score_type, n_portfolios, mw, mnw, allow_short,
                                         max_vol=max_vol, min_ann_ret=min_ann_ret, window_cache=window_cache,
                                         min_pos=min_pos, round_step=round_step, max_pos=max_pos,
                                         weighting=weighting)
@@ -866,7 +946,12 @@ def _walk_forward_single(returns_df, approach, score_type, rebal_months,
             'oos_days': len(oos_data)})
 
     if not oos_segments or len(weight_history) < need: return None
-    current_w = _optimize_at_rebalance(returns_df, approach, score_type, n_portfolios, mw, mnw, allow_short,
+    if screen:
+        current_w = _screen_at_rebalance(returns_df, approach, score_type, max_pos, mw,
+                                         max_vol=max_vol, min_ann_ret=min_ann_ret,
+                                         min_pos=min_pos, round_step=round_step)
+    else:
+        current_w = _optimize_at_rebalance(returns_df, approach, score_type, n_portfolios, mw, mnw, allow_short,
                                         max_vol=max_vol, min_ann_ret=min_ann_ret, window_cache=window_cache,
                                         min_pos=min_pos, round_step=round_step, max_pos=max_pos,
                                         weighting=weighting)
@@ -933,7 +1018,7 @@ def run_walkforward_grid(symbols, score_type='Win Rate', rebal_months=3, n_portf
                          txn_cost=0.001, allow_short=False, progress_bar=None,
                          max_vol=None, min_ann_ret=None, benchmarks=None, min_pos=0.0, round_step=0.0,
                          min_history_days=0, max_pos=0, universe='common',
-                         weighting=WEIGHTING_OPTIMIZED):
+                         weighting=WEIGHTING_OPTIMIZED, screen=False):
     data, valid = fetch_symbol_history(tuple(symbols), days=fetch_days,
                                        min_history_days=min_history_days,
                                        align='union' if universe == UNIVERSE_ASLISTED else 'common')
@@ -1001,7 +1086,7 @@ def run_walkforward_grid(symbols, score_type='Win Rate', rebal_months=3, n_portf
                                       n_portfolios, max_weight, min_weight, txn_cost, allow_short,
                                       max_vol=max_vol, min_ann_ret=min_ann_ret,
                                       window_cache=window_cache, min_pos=min_pos, round_step=round_step,
-                                      max_pos=max_pos, weighting=weighting)
+                                      max_pos=max_pos, weighting=weighting, screen=screen)
             if wf is not None:
                 metrics = _calc_oos_metrics(wf['oos_returns'])
                 if metrics is not None:

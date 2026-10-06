@@ -11,7 +11,7 @@ from portfolio import (C_MUTE, C_BG, C_TXT, C_TXT2, C_GOLD, BENCH_COLORS, MAX_BE
                        fetch_symbol_history, fetch_notes, min_hist_frontier, min_hist_auto,
                        min_hist_days_for, sweep_configs, composite_ranks, rank_rows,
                        UNIVERSES, UNIVERSE_SHARED, WEIGHTINGS, WEIGHTING_OPTIMIZED,
-                       MODES, MODE_WF, MODE_FS,
+                       MODES, MODE_WF, MODE_FS, MODE_EW,
                        WEIGHTING_EQUAL,
                        benchmark_series, _bench_metrics, _calc_oos_metrics,
                        run_walkforward_grid, run_fullsample,
@@ -405,10 +405,18 @@ def render_single_tab(is_mobile):
         if st.session_state.get('port_mode') not in MODES:
             st.session_state.port_mode = MODES[0]
         mode = st.selectbox('Mode', MODES, key='port_mode',
-                            help='How the weights are chosen. Walk-Forward optimises on past data only and scores the '
-                                 'period that follows, which is the honest test. Full Sample optimises on all the data '
-                                 'and scores the same data, which flatters. Equal Weight skips optimisation: every '
-                                 'asset gets 1/N.')
+                            help='Which engine chooses the holdings. Walk-Forward searches weight '
+                                 'combinations on past data only and scores the period that follows, which is '
+                                 'the honest test. Full Sample searches on all the data and scores that same '
+                                 'data, which flatters. Equal Weight (ranked) runs no search at all: it scores '
+                                 'each SYMBOL on the Objective, takes the best Max Pos of them and holds those '
+                                 'at 1/N. That is a narrower claim and a far cheaper one — it is also blind to '
+                                 'how the names move together, which the search is not.')
+        # mode == MODE_EW inline: is_screen is derived a few lines below, after
+        # the other two columns have been drawn.
+        if mode == MODE_EW:
+            st.caption('Scores each symbol on the **Objective**, holds the best **Max Pos** at 1/N. '
+                       'Leave Max Pos blank to hold the whole universe.')
     with a3:
         bench_input = st.text_input('Benchmark (optional)', key='port_bench',
                                     placeholder=f'e.g. SPY, XLV (max {MAX_BENCHMARKS})',
@@ -418,6 +426,11 @@ def render_single_tab(is_mobile):
 
     is_mc = mode == MODE_WF
     is_fs = mode == MODE_FS
+    # Equal Weight SELECTS now: it ranks the symbols themselves on the objective
+    # and holds the best N at 1/N. So Objective, Max Pos and the weight-shaping
+    # fields apply to it as well; only what belongs to the Monte Carlo search --
+    # Sims, Weighting, Direction, Min Wt -- stays out of reach.
+    is_screen = mode == MODE_EW
     _dis = not (is_mc or is_fs)
 
     # ---------------------------------------------------------------- how to test
@@ -427,7 +440,6 @@ def render_single_tab(is_mobile):
         # Composite, not Auto: a search is worth opting into, not something every
         # run should do by surprise.
         score = st.selectbox('Objective', AUTO_OBJECTIVES, index=1, key='port_score',
-                             disabled=_dis,
                              help='What the optimiser maximises, and what the ranking table then sorts on \u2014 the '
                                   'same nine SPREADS offers. Auto searches them instead of making you pick: it runs '
                                   'the lot at reduced Sims, takes the one with the best length-adjusted Composite, '
@@ -488,7 +500,6 @@ def render_single_tab(is_mobile):
                                       'never selecting.')
     with c0:
         max_pos_str = st.text_input('Max Pos (how many names)', key='port_maxpos', placeholder='e.g. 20',
-                                    disabled=_dis,
                                     help='Cap on how many holdings the portfolio ends up with. The optimiser '
                                          'picks its weights over the whole universe, then everything outside '
                                          'the biggest N goes to 0 and the survivors are rescaled to 100%. '
@@ -498,17 +509,17 @@ def render_single_tab(is_mobile):
                                          'no ranking to take a top N from. For the best N held equally, use '
                                          'a Monte Carlo Mode with Weighting set to Equal weight.')
     with c1:
-        min_pos_str = st.text_input('Min Pos % (drop below)', key='port_minpos', placeholder='e.g. 1', disabled=_dis,
+        min_pos_str = st.text_input('Min Pos % (drop below)', key='port_minpos', placeholder='e.g. 1',
                                     help='Dust cut. After the weights are chosen, anything under this goes to 0 and the '
                                          'rest are rescaled to 100%. Set 1 and a 0.4% sliver becomes nothing. Blank '
                                          'keeps every sliver. The opposite of Min Wt %: this throws assets out.')
     with c2:
-        round_str = st.text_input('Round % (step)', key='port_round', placeholder='e.g. 1', disabled=_dis,
+        round_str = st.text_input('Round % (step)', key='port_round', placeholder='e.g. 1',
                                   help='Snap the final weights to a clean step: 1 gives whole percents (34%, 29%, 0%), '
                                        '0.5 gives half percents. Under half a step rounds to 0, and the weights still '
                                        'add to exactly 100%. Pair with Min Pos % to be sure slivers are gone.')
     with c3:
-        max_wt_str = st.text_input('Max Wt %', key='port_maxwt', disabled=_dis,
+        max_wt_str = st.text_input('Max Wt %', key='port_maxwt',
                                    help='Ceiling on any single asset, so nothing dominates. 50 means no holding above 50%.')
     with c4:
         min_wt_str = st.text_input('Min Wt %', key='port_minwt', disabled=_dis,
@@ -531,11 +542,11 @@ def render_single_tab(is_mobile):
                                      help='Random weight combinations tested per lookback window. Higher is steadier '
                                           'but slower. 10,000 is a good default.')
         with d3:
-            max_vol_str = st.text_input('Max Vol %', key='port_maxvol', placeholder='e.g. 15', disabled=_dis,
+            max_vol_str = st.text_input('Max Vol %', key='port_maxvol', placeholder='e.g. 15',
                                         help='Soft cap on annualised volatility. Portfolios above it are penalised in '
                                              'the search rather than banned, so the result can still exceed it.')
         with d4:
-            min_ret_str = st.text_input('Min Ret %', key='port_minret', placeholder='e.g. 5', disabled=_dis,
+            min_ret_str = st.text_input('Min Ret %', key='port_minret', placeholder='e.g. 5',
                                         help='Soft floor on annualised return. Portfolios below it are penalised in the '
                                              'search rather than banned.')
         with d5:
@@ -552,7 +563,7 @@ def render_single_tab(is_mobile):
     run_clicked = st.button(btn_label, key='port_run', type='primary')
 
     # Determine session key based on mode to avoid cross-contamination
-    if is_mc:
+    if is_mc or is_screen:
         result_key = 'port_grid'
     elif is_fs:
         result_key = 'port_fs_result'
@@ -560,7 +571,9 @@ def render_single_tab(is_mobile):
         result_key = 'port_ew_result'
 
     if not run_clicked and result_key not in st.session_state:
-        if is_mc:
+        if is_screen:
+            hint = 'the ranking'
+        elif is_mc:
             hint = 'walk-forward optimization'
         elif is_fs:
             hint = 'full-sample optimization (in-sample)'
@@ -631,7 +644,14 @@ def render_single_tab(is_mobile):
 
         if is_fs:
             universe = UNIVERSE_SHARED
-        if is_mc:
+        if is_screen:
+            # Same walk-forward engine, different chooser: no simulation at all,
+            # and the sizing is 1/N by construction rather than by request.
+            _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
+                    'Long Only', sims_str, max_wt_str, min_wt_str, max_vol_str, min_ret_str,
+                    txn_cost, bench, min_pos_str, round_str, min_hist_days, max_pos_str,
+                    universe, WEIGHTING_EQUAL, screen=True)
+        elif is_mc:
             _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
                     direction, sims_str, max_wt_str, min_wt_str, max_vol_str, min_ret_str,
                     txn_cost, bench, min_pos_str, round_str, min_hist_days, max_pos_str,
@@ -643,8 +663,9 @@ def render_single_tab(is_mobile):
         else:
             _run_ew(symbols, rebal, fetch_days, txn_cost, rebal_label, period_label, bench, min_hist_days)
 
-    # Display results
-    if is_mc:
+    # Display results. The screen fills the same slot the walk-forward does,
+    # because it IS the walk-forward with a different chooser.
+    if is_mc or is_screen:
         _display_mc(is_mobile, _lbl)
     elif is_fs:
         _display_fs(is_mobile, _lbl)
@@ -659,7 +680,8 @@ def render_single_tab(is_mobile):
 def _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
             direction, sims_str, max_wt_str, min_wt_str, max_vol_str, min_ret_str,
             txn_cost, benchmark=(), min_pos_str='', round_str='', min_hist_days=0,
-            max_pos_str='', universe=UNIVERSE_SHARED, weighting=WEIGHTING_OPTIMIZED):
+            max_pos_str='', universe=UNIVERSE_SHARED, weighting=WEIGHTING_OPTIMIZED,
+            screen=False):
     try: max_wt = max(10, min(100, float(max_wt_str))) / 100.0
     except (ValueError, TypeError): max_wt = 0.50
     try: min_wt = max(0, min(50, float(min_wt_str))) / 100.0
@@ -682,7 +704,7 @@ def _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
     if min_wt > 0 and min_wt * n_syms > 1.0: min_wt = round(1.0 / n_syms, 4)
     if min_wt >= max_wt: min_wt = 0.0
 
-    progress = st.progress(0, text='Starting walk-forward...')
+    progress = st.progress(0, text='Ranking symbols...' if screen else 'Starting walk-forward...')
     grid = run_walkforward_grid(symbols, score_type=score, rebal_months=rebal,
                                  fetch_days=fetch_days, n_portfolios=n_sims,
                                  max_weight=max_wt, min_weight=min_wt,
@@ -691,7 +713,7 @@ def _run_mc(symbols, score, rebal_label, rebal, period_label, fetch_days,
                                  max_vol=max_vol, min_ann_ret=min_ann_ret,
                                  benchmarks=benchmark, min_pos=min_pos, round_step=round_step,
                                  min_history_days=min_hist_days, max_pos=max_pos,
-                                 universe=universe, weighting=weighting)
+                                 universe=universe, weighting=weighting, screen=screen)
     progress.empty()
 
     if not grid or not grid['results']:

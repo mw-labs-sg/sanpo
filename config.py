@@ -422,7 +422,9 @@ def drop_listing_artifacts(closes, threshold=LISTING_ARTIFACT_RETURN):
     """
     if closes is None or len(closes) < 3:
         return closes, None
-    bad = closes.index[closes.pct_change() > threshold]
+    # fill_method=None: pandas is dropping the implicit pad, and padding here
+    # would read a gap as a flat bar rather than leaving it unknown.
+    bad = closes.index[closes.pct_change(fill_method=None) > threshold]
     if not len(bad):
         return closes, None
     last = bad[-1]
