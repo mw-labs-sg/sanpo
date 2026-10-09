@@ -5,6 +5,7 @@ import logging
 
 from config import FUTURES_GROUPS, THEMES, SYMBOL_NAMES, FONTS, clean_symbol
 from spreads import (LOOKBACK_OPTIONS, INTERVAL_CONFIG, fetch_sector_spread_data,
+                     lookback_note,
                      fetch_interval_data, compute_sector_spreads,
                      compute_basket_singles, annualization_factor,
                      composite_ranks, sort_spread_pairs, basket_picker,
@@ -75,9 +76,16 @@ def render_scan_tab(is_mobile):
                  'you see more than the ranking — measured across Futures, Crypto '
                  'and US Sectors, 15m/1h/4h rank +0.90 to +1.00 with daily and '
                  'pick the same leader.')
-        lookback_label = st.selectbox("Lookback", list(LOOKBACK_OPTIONS.keys()), index=0,
+        # YTD stays the default now that shorter anchors sit above it.
+        _lb_keys = list(LOOKBACK_OPTIONS.keys())
+        lookback_label = st.selectbox("Lookback", _lb_keys, index=_lb_keys.index('YTD'),
             key='scan_lookback_sel',
-            help='How far back to score, in trading days.')
+            help='How far back to score. Today, WTD, MTD and YTD are calendar '
+                 'anchors — they start at the session, the Monday, the 1st or '
+                 'January and run to now, so they get longer as the period does. '
+                 'The rest are fixed counts of trading days. Today and WTD only '
+                 'amount to a window on an intraday Interval: at 1d they are one '
+                 'bar and five.')
         lookback_days = LOOKBACK_OPTIONS[lookback_label]
         scan_sort = st.selectbox("Optimize by", list(SCAN_SORT_KEYS.keys()), index=0,
             key='scan_sort_sel',
@@ -98,9 +106,11 @@ def render_scan_tab(is_mobile):
         # Streamlit's block, so the button measured 4px ABOVE this line and sat
         # on top of it.
         n_sym = sum(len(FUTURES_GROUPS[g]) for g in picked)
+        note = lookback_note(lookback_label, lookback_days, interval)
+        warn = f" · <span style='color:#fbbf24'>{note}</span>" if note else ''
         st.markdown(f"<div style='font-size:10px;color:{_mut};font-family:{FONTS};"
                     f"line-height:1.6;padding:14px 0 22px 2px'>{len(picked)} baskets · "
-                    f"{n_sym:,} symbols</div>", unsafe_allow_html=True)
+                    f"{n_sym:,} symbols{warn}</div>", unsafe_allow_html=True)
         scan_clicked = st.button('▶  Scan', key='spread_scan_all', type='primary',
                                  use_container_width=True)
 

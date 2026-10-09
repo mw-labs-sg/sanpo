@@ -204,8 +204,17 @@ def align_frames(frames, intraday, min_bars=MIN_BARS, min_symbols=MIN_SYMBOLS):
 # DATA FETCHING
 # =============================================================================
 
+# A positive value is a COUNT OF BARS to keep. The rest are calendar anchors,
+# because "month to date" is not a number of days -- it is one length on the 2nd
+# and another on the 30th -- so they are stored as sentinels and resolved to a
+# start DATE at fetch time. YTD was already 0 and keeps working the same way.
+LOOKBACK_TODAY, LOOKBACK_WTD, LOOKBACK_MTD, LOOKBACK_YTD = -3, -2, -1, 0
+
 LOOKBACK_OPTIONS = {
-    'YTD': 0,
+    'Today': LOOKBACK_TODAY,
+    'WTD': LOOKBACK_WTD,
+    'MTD': LOOKBACK_MTD,
+    'YTD': LOOKBACK_YTD,
     '30 Days': 30,
     '60 Days': 60,
     '120 Days': 120,
@@ -213,12 +222,92 @@ LOOKBACK_OPTIONS = {
     '520 Days': 520,
 }
 
+# Below this many bars the statistics stop meaning anything -- _spread_sharpe and
+# friends already refuse to score a window shorter than 5.
+MIN_SPREAD_BARS = 5
+
+
+def lookback_start(lookback_days, now=None):
+    """The date an anchored lookback begins, or None when it is a bar count.
+
+    TODAY resolves against the data, not the clock -- see _trim_to_anchor. Before
+    the open, on a weekend or on a holiday the calendar date holds no bars at
+    all, and "today" meaning "nothing" is not what anyone picked it for.
+    """
+    now = pd.Timestamp(now or datetime.now()).normalize()
+    if lookback_days == LOOKBACK_TODAY:
+        return now
+    if lookback_days == LOOKBACK_WTD:
+        return now - pd.Timedelta(days=int(now.weekday()))
+    if lookback_days == LOOKBACK_MTD:
+        return now.replace(day=1)
+    if lookback_days == LOOKBACK_YTD:
+        return now.replace(month=1, day=1)
+    return None
+
+
+def lookback_is_anchored(lookback_days):
+    return lookback_days <= 0
+
+
+def _trim_to_anchor(data, lookback_days, anchor):
+    """Cut DATA back to the start of an anchored window.
+
+    Today is the latest SESSION in the data rather than the current calendar
+    date: at 08:00, on a Saturday, or on a holiday the two are different and
+    only one of them has bars in it.
+    """
+    if data is None or not len(data):
+        return data
+    if lookback_days == LOOKBACK_TODAY:
+        return data[data.index >= data.index[-1].normalize()]
+    return data[data.index >= anchor]
+
+
+def expected_bars(lookback_days, interval_key, now=None):
+    """Roughly how many bars a lookback holds at an interval.
+
+    Close enough to warn on BEFORE fetching, which is the point: an empty table
+    after a thirty-second scan is a poor way to learn that Today is one bar.
+    """
+    cfg = INTERVAL_CONFIG.get(interval_key)
+    if cfg is None:
+        return None
+    anchor = lookback_start(lookback_days, now)
+    if anchor is None:
+        return int(lookback_days)
+    now = pd.Timestamp(now or datetime.now()).normalize()
+    cal_days = max(int((now - anchor).days), 0) + 1
+    # Weekends are not sessions. Five sevenths is wrong for crypto and right for
+    # everything else, and this only has to be close enough to warn on.
+    sessions = max(cal_days * 5 / 7, 1)
+    return max(int(sessions * cfg['bars_per_day']), 1)
+
+
+def lookback_note(lookback_label, lookback_days, interval_key, now=None):
+    """A warning for a lookback and interval too short to score, or None.
+
+    Today is one daily bar and WTD is five; they are intraday selections. Saying
+    so beside the control beats an empty table underneath it.
+    """
+    n = expected_bars(lookback_days, interval_key, now)
+    if n is None or n >= MIN_SPREAD_BARS:
+        return None
+    works = [k for k in INTERVAL_CONFIG
+             if (expected_bars(lookback_days, k, now) or 0) >= MIN_SPREAD_BARS]
+    fix = f' Try {", ".join(works)}.' if works else ' No interval makes a window of it.'
+    return (f'{lookback_label} is about {n} bar{"s" if n != 1 else ""} at {interval_key}, '
+            f'under the {MIN_SPREAD_BARS} anything here can be scored on.{fix}')
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_sector_spread_data(sector, lookback_days=0):
     symbols = FUTURES_GROUPS.get(sector, [])
     if not symbols: return None
-    if lookback_days == 0:
-        start = datetime.now().replace(month=1, day=1).strftime('%Y-%m-%d')
+    anchor = lookback_start(lookback_days)
+    if anchor is not None:
+        # One extra day either side of the anchor: a weekend or a holiday on the
+        # boundary would otherwise leave the window a bar short of itself.
+        start = (anchor - pd.Timedelta(days=7)).strftime('%Y-%m-%d')
     else:
         start = (datetime.now() - pd.Timedelta(days=int(lookback_days * 1.5))).strftime('%Y-%m-%d')
     data = pd.DataFrame()
@@ -245,7 +334,9 @@ def fetch_sector_spread_data(sector, lookback_days=0):
             logger.debug(f"[{sym}] spread data fetch error: {e}")
     if data.empty or len(data.columns) < 2: return None
     data = data.ffill().dropna()
-    if lookback_days > 0 and len(data) > lookback_days:
+    if anchor is not None:
+        data = _trim_to_anchor(data, lookback_days, anchor)
+    elif len(data) > lookback_days:
         data = data.iloc[-lookback_days:]
     if len(data) < 2: return None
     data = 100 * (data / data.iloc[0])
@@ -525,8 +616,15 @@ def fetch_interval_data(symbols, interval_key, lookback_days):
     if len(symbols) < 2:
         return None, fallback_af
 
-    if lookback_days == 0:  # YTD
-        start = datetime.now().replace(month=1, day=1).strftime('%Y-%m-%d')
+    anchor = lookback_start(lookback_days)
+    if anchor is not None:
+        # Ask for a few days before the anchor so the first session is whole,
+        # then trim back to it once the bars are in. Clamped to what the
+        # interval can actually reach back to.
+        cal_days = int((pd.Timestamp.now().normalize() - anchor).days) + 7
+        if cfg['max_cal_days']:
+            cal_days = min(cal_days, cfg['max_cal_days'])
+        start = (datetime.now() - pd.Timedelta(days=max(cal_days, 2))).strftime('%Y-%m-%d')
     else:
         cal_days = int(lookback_days * 1.6)
         if cfg['max_cal_days']:
@@ -573,12 +671,14 @@ def fetch_interval_data(symbols, interval_key, lookback_days):
         bars_per_day = max(len(data) / sessions, 0.1)
     ann_factor = annualization_factor(data.index, fallback_af)
 
-    if lookback_days > 0:
+    if anchor is not None:
+        data = _trim_to_anchor(data, lookback_days, anchor)
+    elif lookback_days > 0:
         bars = max(int(lookback_days * bars_per_day), 5)
         if len(data) > bars:
             data = data.iloc[-bars:]
 
-    if len(data) < 5:
+    if len(data) < MIN_SPREAD_BARS:
         return None, ann_factor
     return 100 * (data / data.iloc[0]), ann_factor
 
