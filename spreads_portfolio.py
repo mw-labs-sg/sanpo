@@ -70,9 +70,14 @@ WEIGHT_OPTIONS = ['Equal', 'Inverse vol']
 PICK_OPTIONS = ['Best of each basket', 'Best overall']
 
 HOLD_OPTIONS = OrderedDict([
-    ('All', None), ('Top 1', 1), ('Top 3', 3), ('Top 5', 5),
-    ('Top 10', 10), ('Top 20', 20),
+    ('All', None), ('Top 1', 1), ('Top 3', 3), ('Top 5', 5), ('Top 10', 10),
+    ('Top 15', 15), ('Top 20', 20), ('Top 25', 25), ('Top 30', 30),
 ])
+
+# Top 20 rather than All. All holds one spread per ticked basket, so the size of
+# the book is whatever the picker happened to be set to -- tick 58 baskets and
+# you are holding 58 spreads without having chosen to. A count is a decision.
+HOLD_DEFAULT = 'Top 20'
 
 # Lower is better for all of them, because every one is scored as a rank.
 SELECT_OPTIONS = ['Composite', 'Sharpe', 'Sortino', 'ROA', 'ER', 'Win Rate']
@@ -584,10 +589,23 @@ def render_spread_portfolio_tab(is_mobile):
                                 'Best overall ranks every pair against every '
                                 'other and ignores which basket it came from.')
     with c5:
-        hold_label = st.selectbox('Hold', list(HOLD_OPTIONS.keys()), index=0,
-            key='sp_hold', help='How many of those to hold, equal weight, until '
-                                'the next rebalance. All holds every nominee — '
-                                'one spread per basket.')
+        _hold_keys = list(HOLD_OPTIONS.keys())
+        hold_label = st.selectbox('Hold', _hold_keys,
+            index=_hold_keys.index(HOLD_DEFAULT), key='sp_hold',
+            help='How many of those to hold, equal weight, until the next '
+                 'rebalance. All holds every nominee, which with Best of each '
+                 'basket means one spread per ticked basket — a book sized by '
+                 'the picker rather than by you. The cap cannot conjure '
+                 'nominees: Best of each basket only ever nominates one per '
+                 'basket, so Hold above the number of ticked baskets does '
+                 'nothing. Best overall nominates every pair.')
+        # Silent no-op otherwise: Top 20 over 5 ticked baskets is Top 5, and the
+        # table gives no hint that the number was ignored.
+        _hold_n = HOLD_OPTIONS[hold_label]
+        if (_hold_n and pick_label == PICK_OPTIONS[0] and _hold_n > len(picked)
+                and picked):
+            st.caption(f'Only {len(picked)} nominee{"s" if len(picked) != 1 else ""} '
+                       f'— one per basket. Tick more, or Pick → Best overall.')
     with c6:
         metric = st.selectbox('Select by', SELECT_OPTIONS, index=0,
             key='sp_metric', help='Which metric picks the holdings, measured on '
