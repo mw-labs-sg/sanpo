@@ -519,6 +519,76 @@ def compute_sector_spreads(data, ann_factor=252):
 
     return pairs
 
+def compute_leg_spreads(data, leg, side='Long', ann_factor=252):
+    """Score LEG against every other column, one pair each, in a fixed direction.
+
+    compute_sector_spreads answers "which pair is best"; this answers "I am
+    trading THIS name, what is the other side". Two things follow from that.
+
+    It never flips. A negative Sharpe there means the pair is the same trade the
+    other way round and is worth swapping; here it means the trade you asked for
+    lost money, and quietly reversing it would answer a question you did not ask.
+    So a bad counter-leg is allowed to rank badly.
+
+    And it is linear rather than every-pair: one spread per candidate instead of
+    n(n-1)/2, which is what makes a 300-name universe answerable at all.
+    """
+    if data is None or leg not in data.columns or len(data.columns) < 2:
+        return []
+    try:
+        span_days = max(int((data.index[-1] - data.index[0]).days), 1)
+    except Exception:
+        span_days = len(data)
+
+    r_leg = data[leg].pct_change().dropna()
+    long_leg = (side == 'Long')
+    pairs = []
+    for other in data.columns:
+        if other == leg:
+            continue
+        r_o = data[other].pct_change().dropna()
+        spread_ret = ((r_leg - r_o) if long_leg else (r_o - r_leg)).dropna()
+        if len(spread_ret) < MIN_SPREAD_BARS:
+            continue
+
+        sh = _spread_sharpe(spread_ret, ann_factor)
+        so = _spread_sortino(spread_ret, ann_factor)
+        mdd, add = _spread_drawdowns(spread_ret)
+        cum_spread = (1 + spread_ret).cumprod()
+        total = float((cum_spread.iloc[-1] - 1) * 100)
+        ann = float(spread_ret.mean() * ann_factor * 100)
+        vol = float(spread_ret.std() * np.sqrt(ann_factor) * 100)
+        mar = float(np.clip(ann / max(abs(add), MIN_DD_PCT), -MAX_RATIO, MAX_RATIO))
+        roa = _spread_roa(spread_ret, mdd)
+        er = _spread_er(spread_ret)
+        r2_val = _spread_r2(spread_ret)
+        corr = float(r_leg.corr(r_o))
+        win_rate = float((spread_ret > 0).sum() / len(spread_ret) * 100) if len(spread_ret) else 50.0
+
+        s1, s2 = (leg, other) if long_leg else (other, leg)
+        cum_sp = pd.Series(100.0, index=data.index[:1])
+        cum_sp = pd.concat([cum_sp, 100 * (1 + spread_ret).cumprod()])
+        cum_sp = cum_sp[~cum_sp.index.duplicated(keep='last')]
+
+        pairs.append({
+            'long': s1, 'short': s2, 'other': other,
+            'Sharpe': sh, 'Sortino': so, 'MAR': mar, 'ROA': roa, 'ER': er, 'R²': r2_val,
+            'Tot%': total, 'Ann%': ann, 'Vol%': vol, 'MDD%': mdd, 'ADD%': add,
+            'Corr': corr, 'Win%': win_rate,
+            'Bars': len(spread_ret), 'Days': span_days,
+            # Nothing to beat: the outright leg is the thing being hedged, not a
+            # rival. The column it drives is hidden on this tab.
+            'beats_long': False,
+            'cum_long': data[s1], 'cum_short': data[s2], 'cum_spread': cum_sp,
+            'best_long_sym': leg, 'best_long_sharpe': 0.0,
+        })
+
+    if not pairs:
+        return []
+    composite_ranks(pairs)
+    return pairs
+
+
 def compute_basket_singles(data, ann_factor=252, direction='Long only'):
     """Score every symbol on its own, held long or held short.
 
@@ -958,6 +1028,7 @@ def render_spread_charts(pairs, data, theme, mobile=False):
 
 def render_spreads_tab(is_mobile):
     from spreads_scan import render_scan_tab
+    from spreads_leg import render_leg_tab
     from spreads_portfolio import render_spread_portfolio_tab
 
     # Green underline on nested sub-tabs only (inside a tab panel)
@@ -999,10 +1070,13 @@ def render_spreads_tab(is_mobile):
     # view. The old tab's Interval control went with it -- measured across
     # Futures, Crypto and US Sectors, rankings at 15m/1h/4h correlate +0.90 to
     # +1.00 with daily and pick the same top spread, for ~90x the bars.
-    tab_sector, tab_port = st.tabs(['Sector', 'Portfolio'])
+    tab_sector, tab_leg, tab_port = st.tabs(['Sector', 'Leg', 'Portfolio'])
 
     with tab_sector:
         render_scan_tab(is_mobile)
+
+    with tab_leg:
+        render_leg_tab(is_mobile)
 
     with tab_port:
         render_spread_portfolio_tab(is_mobile)
